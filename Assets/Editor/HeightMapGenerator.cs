@@ -4,7 +4,8 @@ using Unity.Mathematics;
 
 public class HeightMapGenerator : EditorWindow
 {
-    private int[] mapSizes = { 32, 64, 128, 256 };
+    private Texture2D customHeightmap;
+    private int[] mapSizes = { 32, 64, 128, 256, 512, 1024, 2048 };
     private int mapIndex = 3;
     private int mapRes = 256;
     private float baseRoughness = 1f;
@@ -24,6 +25,10 @@ public class HeightMapGenerator : EditorWindow
 
     private void OnGUI()
     {
+        // Custom heightmap
+        GUILayout.Label("Custom Heightmap Input");
+        customHeightmap = (Texture2D)EditorGUILayout.ObjectField("Custom Heightmap", customHeightmap, typeof(Texture2D), false);
+
         // Map Resolution
         GUILayout.Label("Heightmap Generator Settings", EditorStyles.boldLabel);
         mapIndex = EditorGUILayout.Popup("Map Resolution", mapIndex, System.Array.ConvertAll(mapSizes, x => x.ToString()));
@@ -93,13 +98,13 @@ public class HeightMapGenerator : EditorWindow
     }
 
     /// <summary>
-    /// TL;DR: generates a heightmap for terrain using Perlin noise
+    /// <para>TL;DR: generates a heightmap for terrain using Perlin noise</para>
     /// 
-    /// 0 - Creates a new Texture2D with dimensions mapRes x mapRes.
-    /// 1 - Generates a noise map using Perlin noise.
-    /// 2 - Converts the noise map to grayscale colors.
-    /// 3 - Sets the processed colors to the heightmap texture.
-    /// 4 - Applies the changes to the texture and returns it.
+    /// 0 - Creates a new Texture2D with dimensions mapRes x mapRes.<br/>
+    /// 1 - Generates a noise map using Perlin noise.<br/>
+    /// 2 - Converts the noise map to grayscale colors.<br/>
+    /// 3 - Sets the processed colors to the heightmap texture.<br/>
+    /// 4 - Applies the changes to the texture and returns it.<br/>
     /// </summary>
     /// <returns></returns>
     Texture2D GenerateHeightmap()
