@@ -1,5 +1,6 @@
 using Unity.Entities;
 using Unity.Mathematics;
+using Unity.Collections;
 
 /// <summary>
 /// Represents the health and damage capabilities of an entity (both predator and prey).
@@ -24,8 +25,7 @@ public struct Lifespan : IComponentData
     public float HeroAge;  // Age at which the entity becomes a hero (e.g., 12 years)
     public float LegendAge; // Age at which the entity becomes a legend (e.g., 15 years)
     public bool IsLegendary;  // True if the entity is legendary (it can't die of old age)
-    public bool IsHeroic;     // True if the entity is heroic (it can't die of old age)
-    public float Age;         // Current age of the entity
+    public float Age;       // Current age of the entity
 
     /// <summary>
     /// Randomizes the lifespan based on a Gaussian or normal distribution.
@@ -35,26 +35,12 @@ public struct Lifespan : IComponentData
     public void RandomizeLifespan(Unity.Mathematics.Random random)
     {
         Age = random.NextFloat(MinAge, MaxAge);  // Random age between MinAge and MaxAge
-        HeroAge = MaxAge + random.NextFloat(1f, 5f);   // Heroic age starts beyond MaxAge
-        LegendAge = HeroAge + random.NextFloat(1f, 5f); // Legendary age starts beyond HeroAge
-    }
-
-    /// <summary>
-    /// Determines if the entity should die based on its age and a probability factor.
-    /// </summary>
-    /// <param name="random">Random number generator</param>
-    /// <returns>True if the entity should die, false otherwise</returns>
-    public bool ShouldDie(Unity.Mathematics.Random random)
-    {
-        if (IsHeroic || IsLegendary) return false; // Immortal to time if heroic or legendary
-        if (Age < MaxAge) return false; // No chance of death before reaching MaxAge
-
-        float survivalChance = math.exp(-(Age - MaxAge)); // Exponential decay for survival chance
-        return random.NextFloat(0f, 1f) > survivalChance; // Higher age = lower survival chance
+        HeroAge = Age + 3f;   // Heroic age starts a bit after the random lifespan
+        LegendAge = Age + 5f; // Legendary age starts even later
     }
 }
 
-/// <summary>
+/// <summary>a
 /// Represents the movement data of an entity (both predator and prey).
 /// Controls direction and speed of the entity.
 /// </summary>
@@ -149,12 +135,4 @@ public struct GroupBehavior : IComponentData
 public struct PackSize : IComponentData
 {
     public int Value;  // Number of predators in the pack (relevant for pack-based behavior)
-}
-
-/// <summary>
-/// On each live animal entity, holds the Entity-prefab used for spawning babies.
-/// </summary>
-public struct PrefabRef : IComponentData
-{
-    public Entity Prefab;
 }

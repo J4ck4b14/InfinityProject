@@ -1,52 +1,23 @@
-﻿using Unity.Entities;
-using Unity.Mathematics;
-using Unity.Transforms;
+using JetBrains.Annotations;
+using System;
+using Unity.Entities;
 using UnityEngine;
+using Random = Unity.Mathematics.Random;
 
-[UpdateInGroup(typeof(InitializationSystemGroup))]
-public partial class AnimalSpawnSystem : SystemBase  // ← note the 'partial'
+public partial class AnimalSpawnSystem : MonoBehaviour
 {
-    protected override void OnUpdate()
+    // Runtime
+    [InternalBufferCapacity(64)]
+    struct AnimalPrefabInfo : IBufferElementData
     {
-        // Cache the active terrain
-        Terrain terrain = Terrain.activeTerrain;
-        TerrainData tData = terrain != null ? terrain.terrainData : null;
+        public Entity EntityPrefab;
+        [Tooltip("How many do you want?")]
+        public float ammount;
+    }
 
-        Entities
-            .WithName("InitialAnimalSpawn")
-            .WithStructuralChanges()      // allow Instantiate & RemoveComponent
-            .ForEach((Entity spawner, DynamicBuffer<AnimalSpawnInfo> buf) =>
-            {
-                if (buf.Length == 0) return;
-
-                for (int i = 0; i < buf.Length; i++)
-                {
-                    var info = buf[i];
-                    for (int j = 0; j < info.Amount; j++)
-                    {
-                        // Instantiate the prefab entity
-                        Entity baby = EntityManager.Instantiate(info.EntityPrefab);
-
-                        if (tData != null)
-                        {
-                            float x = UnityEngine.Random.Range(0f, tData.size.x);
-                            float z = UnityEngine.Random.Range(0f, tData.size.z);
-                            float y = terrain.SampleHeight(new Vector3(x, 0f, z));
-
-                            // Assign its transform
-                            EntityManager.SetComponentData(baby, new LocalTransform
-                            {
-                                Position = new float3(x, y, z),
-                                Rotation = quaternion.identity,
-                                Scale = 1f
-                            });
-                        }
-                    }
-                }
-
-                // Remove our buffer so we only spawn once
-                EntityManager.RemoveComponent<AnimalSpawnInfo>(spawner);
-            })
-            .Run();  // must terminate in Run() or Schedule…
+    [Serializable]
+    public struct AnimalSpawn
+    {
+        
     }
 }

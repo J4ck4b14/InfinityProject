@@ -336,8 +336,8 @@ MonoBehaviour:
   fertile: 0
   male: 0
   fertilityWindow:
-    x: 3
-    y: 14
+    x: 0
+    y: 0
   timeForReproduction: 10
   diet: 1
   maxAge: 10
