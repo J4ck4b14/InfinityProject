@@ -1,71 +1,79 @@
-using UnityEngine;
-using UnityEngine.SceneManagement;
+﻿using UnityEngine;
 using UnityEditor;
 using UnityEditorInternal;
+using UnityEngine.SceneManagement;
 using System.Collections.Generic;
-using UnityEditor.Callbacks;
 
 /// <summary>
-/// Handles the flora placement tab in the Unity Editor.
-/// Allows users to draw a polygonal area, configure flora settings, and generate flora within the area.
+/// Editor tab for procedural placement of flora prefabs within a user-drawn polygon area.
+/// Supports density, scale variation, hue variation, batched instantiation, and chunked combining.
 /// </summary>
 public class FloraTab
 {
-    // List of flora prefabs to be instantiated
-    private List<GameObject> floraPrefabs = new List<GameObject>();
+    // === Inspector data ===
 
-    // Reorderable list for managing flora prefabs in the editor
-    private ReorderableList floraList;
+    /// <summary>List of flora prefabs user may populate.</summary>
+    private readonly List<GameObject> floraPrefabs = new List<GameObject>();
 
-    // Density of flora per square meter
-    private float density = 1f; // trees per meter
+    /// <summary>Reorderable UI list to edit floraPrefabs.</summary>
+    private readonly ReorderableList floraList;
 
-    // Variation in scale for the flora (0 to 1)
+    /// <summary>Instances per square meter to spawn.</summary>
+    private float density = 1f;
+
+    /// <summary>± fraction for random Y‐scale variation.</summary>
     private float scaleVariation = 0.1f;
 
-    // Variation in hue for the flora (0 to 1)
+    /// <summary>± fraction for random hue shift.</summary>
     private float hueVariation = 0.1f;
 
-    // List of points defining the polygonal placement area
-    private List<Vector3> polygonPoints = new List<Vector3>();
+    // === Scene drawing state ===
 
-    // Flag to track whether the user is currently drawing the polygon
+    /// <summary>Points of the polygon being drawn.</summary>
+    private readonly List<Vector3> polygonPoints = new List<Vector3>();
+
+    /// <summary>True if user is in drawing mode.</summary>
     private bool isDrawing = false;
 
-    // --- fields for batched spawn ---
+    // === Batched spawn state ===
+
     private List<Vector3> _spawnSamples;
     private Transform _spawnParent;
     private int _spawnIndex;
     private const int _batchSize = 200;
 
     /// <summary>
-    /// Constructor initializes the reorderable list for flora prefabs.
+    /// Constructor: sets up the reorderable list callbacks.
     /// </summary>
     public FloraTab()
     {
-        floraList = new ReorderableList(floraPrefabs, typeof(GameObject), true, true, true, true);
-        floraList.drawHeaderCallback = rect => EditorGUI.LabelField(rect, "Flora Prefabs");
-        floraList.drawElementCallback = (rect, index, isActive, isFocused) =>
+        floraList = new ReorderableList(floraPrefabs, typeof(GameObject), true, true, true, true)
         {
-            floraPrefabs[index] = (GameObject)EditorGUI.ObjectField(rect, floraPrefabs[index], typeof(GameObject), false);
+            drawHeaderCallback = rect =>
+                EditorGUI.LabelField(rect, "Flora Prefabs"),
+            drawElementCallback = (rect, idx, _, _) =>
+            {
+                floraPrefabs[idx] = (GameObject)EditorGUI.ObjectField(
+                    rect, floraPrefabs[idx], typeof(GameObject), false);
+            },
+            onAddCallback = _ => floraPrefabs.Add(null)
         };
-        floraList.onAddCallback = list => floraPrefabs.Add(null);
     }
 
     /// <summary>
-    /// Draws the flora tab UI in the Unity Editor.
+    /// Draws the Flora tab UI in the editor.
     /// </summary>
     public void Draw()
     {
         EditorGUILayout.LabelField("Flora Settings", EditorStyles.boldLabel);
         floraList.DoLayoutList();
 
-        EditorGUILayout.Space(10);
-        density = EditorGUILayout.Slider(new GUIContent("Density (per m�)", "How many flora items to spawn per square meter"), density, 0.001f, 10f);
-        scaleVariation = EditorGUILayout.Slider(new GUIContent("Scale Variation", "Y-scale range from 1 - x to 1 + x"), scaleVariation, 0f, 1f);
-        hueVariation = EditorGUILayout.Slider(new GUIContent("Hue Variation", "Applies a random hue shift"), hueVariation, 0f, 1f);
+        GUILayout.Space(10);
+        density = EditorGUILayout.Slider("Density (per m^2)", density, 0.001f, 10f);
+        scaleVariation = EditorGUILayout.Slider("Scale Variation", scaleVariation, 0f, 1f);
+        hueVariation = EditorGUILayout.Slider("Hue Variation", hueVariation, 0f, 1f);
 
-        EditorGUILayout.Space(10);
+        GUILayout.Space(10);
         if (!isDrawing && GUILayout.Button("Draw Placement Area"))
         {
             SceneView.duringSceneGui += OnSceneGUI;
@@ -73,47 +81,45 @@ public class FloraTab
         }
 
         if (polygonPoints.Count > 2 && GUILayout.Button("Generate Flora"))
-        {
             GenerateFlora();
-        }
     }
 
     /// <summary>
-    /// Handles the SceneView GUI for drawing the polygonal placement area.
+    /// SceneView callback for drawing the polygon and handling input.
+    /// Shift+Click to add points; Enter to close.
     /// </summary>
-    private void OnSceneGUI(SceneView sceneView)
+    private void OnSceneGUI(SceneView sv)
     {
         Handles.color = new Color(0f, 0.5f, 1f, 0.3f);
-
         Event e = Event.current;
-        // only raycast against "Terrain" layer
-        int terrainMask = LayerMask.GetMask("Terrain");
-        bool prevBackfaces = Physics.queriesHitBackfaces;
+
+        // Raycast only against the "Terrain" layer
+        int mask = LayerMask.GetMask("Terrain");
+        bool prevBack = Physics.queriesHitBackfaces;
         Physics.queriesHitBackfaces = false;
 
         Ray ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
-        if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, terrainMask))
+        if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, mask))
         {
-            // Add points to the polygon when Shift + Left Click is used
+            // Add vertex on Shift + Left-click
             if (e.type == EventType.MouseDown && e.button == 0 && e.shift)
             {
-                Vector3 point = hit.point;
-                polygonPoints.Add(point);
+                polygonPoints.Add(hit.point);
                 e.Use();
                 SceneView.RepaintAll();
             }
 
-            // Draw the polygon lines as the user adds points
+            // Draw live edge
             if (polygonPoints.Count > 1)
             {
                 Handles.DrawAAPolyLine(4, polygonPoints.ToArray());
-                Handles.DrawLine(polygonPoints[polygonPoints.Count - 1], hit.point);
+                Handles.DrawLine(polygonPoints[^1], hit.point);
             }
         }
 
-        Physics.queriesHitBackfaces = prevBackfaces;
+        Physics.queriesHitBackfaces = prevBack;
 
-        // Close the polygon with Enter key
+        // Close polygon on Enter if at least 3 points
         if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Return && polygonPoints.Count > 2)
         {
             isDrawing = false;
@@ -121,19 +127,22 @@ public class FloraTab
             e.Use();
         }
 
-        // Draw the completed polygon if it is closed
+        // Fill if polygon is closed
         if (!isDrawing && polygonPoints.Count > 2)
         {
             Handles.DrawAAConvexPolygon(polygonPoints.ToArray());
-            Handles.color = new Color(0f, 0.5f, 1f, 0.5f); // Blue, half-transparent
-            Handles.DrawSolidRectangleWithOutline(polygonPoints.ToArray(), new Color(0f, 0.5f, 1f, 0.3f), Color.clear);
+            Handles.DrawSolidRectangleWithOutline(
+                polygonPoints.ToArray(),
+                new Color(0f, 0.5f, 1f, 0.3f),
+                Color.clear
+            );
         }
 
         HandleUtility.Repaint();
     }
 
     /// <summary>
-    /// Generates flora within the drawn polygon based on the configured settings.
+    /// Prepares spawn samples inside the polygon and begins batched instantiation.
     /// </summary>
     private void GenerateFlora()
     {
@@ -143,89 +152,89 @@ public class FloraTab
             return;
         }
 
-        // Compute the bounding box of the polygon and determine the number of samples
         Bounds bounds = GetPolygonBounds();
         int sampleCount = Mathf.FloorToInt(bounds.size.x * bounds.size.z * density);
 
-        // Find or create a parent GameObject for the generated flora
-        GameObject parentGO = GameObject.Find("Generated Flora");
-        if (parentGO == null)
-            parentGO = new GameObject("Generated Flora");
+        // Parent for all instances
+        GameObject parentGO = GameObject.Find("Generated Flora") ?? new GameObject("Generated Flora");
         Undo.RegisterCreatedObjectUndo(parentGO, "Generate Flora");
 
         Terrain terrain = Terrain.activeTerrain;
         if (terrain == null)
         {
-            Debug.LogError("No active Terrain found in scene.");
+            Debug.LogError("No active Terrain found.");
             return;
         }
-        Vector3 terrainOrigin = terrain.GetPosition();
-        var rnd = new System.Random();
 
-        // Precompute all valid samples
+        Vector3 origin = terrain.GetPosition();
+        var rnd = new System.Random();
         _spawnSamples = new List<Vector3>(sampleCount);
+
+        // Generate uniform random samples within bounds
         for (int i = 0; i < sampleCount; i++)
         {
             float x = (float)(bounds.min.x + rnd.NextDouble() * bounds.size.x);
             float z = (float)(bounds.min.z + rnd.NextDouble() * bounds.size.z);
             var sample = new Vector3(x, bounds.center.y, z);
+
             if (!IsPointInPolygon(sample, polygonPoints))
                 continue;
-            float y = terrain.SampleHeight(sample) + terrainOrigin.y;
+
+            float y = terrain.SampleHeight(sample) + origin.y;
             _spawnSamples.Add(new Vector3(x, y, z));
         }
 
-        // set up batched spawn
         _spawnParent = parentGO.transform;
         _spawnIndex = 0;
         EditorApplication.update += SpawnUpdate;
     }
 
+    /// <summary>
+    /// Batches instantiation to avoid editor freeze: spawns _batchSize per frame.
+    /// </summary>
     private void SpawnUpdate()
     {
         var rnd = new System.Random();
         int end = Mathf.Min(_spawnIndex + _batchSize, _spawnSamples.Count);
+
         for (int i = _spawnIndex; i < end; i++)
         {
-            // Pick a random prefab
+            // Randomly choose a prefab
             var prefab = floraPrefabs[rnd.Next(floraPrefabs.Count)];
-            if (prefab == null)
-                continue;
+            if (prefab == null) continue;
 
-            // Instantiate
-            var instance = Object.Instantiate(prefab, _spawnSamples[i], Quaternion.identity, _spawnParent);
+            // Instantiate under parent
+            var inst = Object.Instantiate(prefab, _spawnSamples[i], Quaternion.identity, _spawnParent);
 
-            // Scale variation
-            float s = 1f + ((float)rnd.NextDouble() * 2f - 1f) * scaleVariation;
-            instance.transform.localScale = Vector3.one * s;
+            // Apply scale variation
+            float factor = 1f + ((float)rnd.NextDouble() * 2f - 1f) * scaleVariation;
+            inst.transform.localScale = Vector3.one * factor;
 
-            // Hue variation
-            var rend = instance.GetComponentInChildren<Renderer>();
+            // Apply hue variation if material supports _Color
+            var rend = inst.GetComponentInChildren<Renderer>();
             if (rend != null && rend.sharedMaterial.HasProperty("_Color"))
             {
                 Color col = rend.sharedMaterial.color;
-                Color.RGBToHSV(col, out float h, out float sat, out float val);
+                Color.RGBToHSV(col, out float h, out float s, out float v);
                 h = Mathf.Repeat(h + Random.Range(-hueVariation, hueVariation), 1f);
-                rend.sharedMaterial.color = Color.HSVToRGB(h, sat, val);
+                rend.sharedMaterial.color = Color.HSVToRGB(h, s, v);
             }
         }
 
         _spawnIndex = end;
+
+        // When done, cleanup and combine for performance
         if (_spawnIndex >= _spawnSamples.Count)
         {
-            // cleanup
             EditorApplication.update -= SpawnUpdate;
-
-            // Combine and chunk the generated flora for performance
             ChunkAndCombine();
-
             polygonPoints.Clear();
             SceneView.RepaintAll();
         }
     }
 
     /// <summary>
-    /// Combines flora instances into chunks for better performance.
+    /// Divides instances into grid cells, combines meshes, and adds LODGroups.
     /// </summary>
     private void ChunkAndCombine()
     {
@@ -233,105 +242,97 @@ public class FloraTab
         var parent = GameObject.Find("Generated Flora");
         if (parent == null) return;
 
-        // Bucket instances by cell
         var buckets = new Dictionary<Vector2Int, List<Transform>>();
+
+        // Group children by cell coordinate
         foreach (Transform t in parent.transform)
         {
-            var position = t.position;
+            var p = t.position;
             var key = new Vector2Int(
-                Mathf.FloorToInt(position.x / cellSize),
-                Mathf.FloorToInt(position.z / cellSize)
+                Mathf.FloorToInt(p.x / cellSize),
+                Mathf.FloorToInt(p.z / cellSize)
             );
             if (!buckets.TryGetValue(key, out var list))
-            {
-                list = new List<Transform>();
-                buckets[key] = list;
-            }
+                buckets[key] = list = new List<Transform>();
             list.Add(t);
         }
 
-        // Combine meshes for each cell
+        // Combine per cell
         foreach (var kv in buckets)
         {
-            var cellGO = new GameObject($"FloraChunk_{kv.Key.x}_{kv.Key.y}")
+            GameObject cellGO = new GameObject($"FloraChunk_{kv.Key.x}_{kv.Key.y}")
             {
                 transform = { parent = parent.transform }
             };
-            var meshFilter = cellGO.AddComponent<MeshFilter>();
-            var meshRenderer = cellGO.AddComponent<MeshRenderer>();
+            var mf = cellGO.AddComponent<MeshFilter>();
+            var mr = cellGO.AddComponent<MeshRenderer>();
 
             var combines = new List<CombineInstance>();
-            Material sharedMaterial = null;
+            Material sharedMat = null;
 
-            foreach (var transform in kv.Value)
+            // Collect mesh data
+            foreach (var t in kv.Value)
             {
-                var meshFilterChild = transform.GetComponentInChildren<MeshFilter>();
-                if (meshFilterChild == null) continue;
+                var childMF = t.GetComponentInChildren<MeshFilter>();
+                if (childMF == null) continue;
 
                 combines.Add(new CombineInstance
                 {
-                    mesh = meshFilterChild.sharedMesh,
-                    transform = meshFilterChild.transform.localToWorldMatrix
+                    mesh = childMF.sharedMesh,
+                    transform = childMF.transform.localToWorldMatrix
                 });
 
-                if (sharedMaterial == null)
-                {
-                    var renderer = transform.GetComponentInChildren<Renderer>();
-                    if (renderer != null)
-                    {
-                        sharedMaterial = renderer.sharedMaterial;
-                    }
-                }
+                if (sharedMat == null)
+                    sharedMat = t.GetComponentInChildren<Renderer>()?.sharedMaterial;
 
-                UnityEngine.Object.DestroyImmediate(transform.gameObject);
+                Object.DestroyImmediate(t.gameObject);
             }
 
-            if (sharedMaterial != null)
-            {
-                meshRenderer.sharedMaterial = sharedMaterial;
-            }
+            if (sharedMat != null)
+                mr.sharedMaterial = sharedMat;
 
+            // Merge meshes
             var combinedMesh = new Mesh();
             combinedMesh.CombineMeshes(combines.ToArray(), true, true);
-            meshFilter.sharedMesh = combinedMesh;
+            mf.sharedMesh = combinedMesh;
 
-            // Add LODGroup for performance
-            var lodGroup = cellGO.AddComponent<LODGroup>();
-            lodGroup.SetLODs(new LOD[]
+            // Add LODGroup
+            var lod = cellGO.AddComponent<LODGroup>();
+            lod.SetLODs(new[]
             {
-                new LOD(0.5f, new[] { meshRenderer }), // Medium distance
-                new LOD(0.1f, new[] { meshRenderer }), // Far distance
-                new LOD(0f, new Renderer[0]) // Hidden at furthest
+                new LOD(0.5f, new[]{ mr }), // mid-range
+                new LOD(0.1f, new[]{ mr }), // far-range
+                new LOD(0f,  new Renderer[0]) // culled
             });
-            lodGroup.RecalculateBounds();
+            lod.RecalculateBounds();
         }
     }
 
     /// <summary>
-    /// Calculates the bounding box of the polygon.
+    /// Calculates axis-aligned bounding box of the polygon points.
     /// </summary>
     private Bounds GetPolygonBounds()
     {
         Vector3 min = polygonPoints[0], max = polygonPoints[0];
-        foreach (Vector3 point in polygonPoints)
+        foreach (var p in polygonPoints)
         {
-            min = Vector3.Min(min, point);
-            max = Vector3.Max(max, point);
+            min = Vector3.Min(min, p);
+            max = Vector3.Max(max, p);
         }
         return new Bounds((min + max) / 2f, max - min);
     }
 
     /// <summary>
-    /// Determines if a point is inside a polygon using the ray-casting algorithm.
+    /// Ray-casting algorithm to test if a point lies inside a polygon.
     /// </summary>
-    private bool IsPointInPolygon(Vector3 point, List<Vector3> polygon)
+    private bool IsPointInPolygon(Vector3 point, List<Vector3> poly)
     {
-        int count = polygon.Count;
         bool inside = false;
+        int count = poly.Count;
         for (int i = 0, j = count - 1; i < count; j = i++)
         {
-            if (((polygon[i].z > point.z) != (polygon[j].z > point.z)) &&
-                (point.x < (polygon[j].x - polygon[i].x) * (point.z - polygon[i].z) / (polygon[j].z - polygon[i].z) + polygon[i].x))
+            if (((poly[i].z > point.z) != (poly[j].z > point.z)) &&
+                (point.x < (poly[j].x - poly[i].x) * (point.z - poly[i].z) / (poly[j].z - poly[i].z) + poly[i].x))
             {
                 inside = !inside;
             }
@@ -340,7 +341,7 @@ public class FloraTab
     }
 
     /// <summary>
-    /// Cleans up the drawing state when the tab is closed or reset.
+    /// Unsubscribes from SceneView events when tab is closed or toggled away.
     /// </summary>
     public void Cleanup()
     {

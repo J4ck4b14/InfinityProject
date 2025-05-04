@@ -1,105 +1,76 @@
 using System;
 using Unity.Entities;
 using Unity.Mathematics;
-using Unity.Transforms;
 using UnityEngine;
 
+#region Buffer Element Definitions
 
-// Runtime
-[InternalBufferCapacity(64)]
-struct AnimalPrefab : IBufferElementData
+/// <summary>
+/// Holds a reference to an animal-prefab entity.
+/// Used by the runtime spawn system to know which prefab to instantiate.
+/// </summary>
+[InternalBufferCapacity(8)]
+public struct AnimalPrefabBuffer : IBufferElementData
 {
-    public Entity EntityPrefab;
+    public Entity Prefab;
 }
 
+/// <summary>
+/// Holds the spawn count corresponding to each prefab in AnimalPrefabBuffer.
+/// Ensures 1:1 indexing with the prefab buffer.
+/// </summary>
+[InternalBufferCapacity(8)]
+public struct AnimalSpawnCountBuffer : IBufferElementData
+{
+    public int Count;
+}
+
+#endregion
+
+/// <summary>
+/// Authoring MonoBehaviour for "storing" which animal prefabs to spawn, and how many.
+/// During conversion it writes two ECS buffers (prefab refs & counts) onto one "store" entity.
+/// A dedicated runtime system will later read those buffers, perform actual instantiation,
+/// then destroy the store so it only runs once.
+/// </summary>
 public class AnimalStoreAuthor : MonoBehaviour
 {
     [Serializable]
-    public struct AnimalSetupInfo
+    public struct AnimalEntry
     {
-        public AnimalAuthoring animalPrefab; // The prefab for deer or wolf
-        [Tooltip("How many, beauty?")]
-        public int spawnAmmount;
+        [Tooltip("GameObject prefab must have your AnimalAuthoring Baker on it.")]
+        public GameObject prefab;
+        [Tooltip("How many instances of this prefab to spawn at startup.")]
+        public int spawnCount;
     }
 
-    [Serializable]
-    public struct SpawnInfo
-    {
-        public AnimalSetupInfo animal;
-    }
+    [Tooltip("Configure each animal type and its spawn amount here.")]
+    public AnimalEntry[] animals;
 
-    public SpawnInfo[] animals;
-
-    // Baker class to bake the GameObject into an Entity
+    // Baker runs at convert-time (in the editor or in build) to fill ECS buffers.
     class Baker : Baker<AnimalStoreAuthor>
     {
         public override void Bake(AnimalStoreAuthor authoring)
         {
-            var entityManager = World.DefaultGameObjectInjectionWorld.EntityManager;
-            // Get the Entity for this GameObject
-            var entity = GetEntity(TransformUsageFlags.None);
-            var animalPrefabs = AddBuffer<AnimalPrefab>(entity);
+            // Create a single entity that holds our two parallel buffers.
+            var storeEntity = GetEntity(TransformUsageFlags.None);
 
-            foreach (var spawn in authoring.animals)
+            // Add and populate the prefab buffer.
+            var prefabBuffer = AddBuffer<AnimalPrefabBuffer>(storeEntity);
+            // Add and populate the spawn count buffer.
+            var countBuffer = AddBuffer<AnimalSpawnCountBuffer>(storeEntity);
+
+            foreach (var entry in authoring.animals)
             {
+                // Convert each GameObject prefab into its converted-entity form.
+                var prefabEntity = GetEntity(entry.prefab, TransformUsageFlags.Dynamic);
 
-                // Log to check if we are iterating over all the spawn entries correctly
-                Debug.Log($"Processing {spawn.animal} animal types in this spawn entry.");
-                var animalEntity = GetEntity(spawn.animal.animalPrefab.gameObject, TransformUsageFlags.Dynamic | TransformUsageFlags.WorldSpace);
-
-                // Add animal prefab to buffer
-                animalPrefabs.Add(new AnimalPrefab { EntityPrefab = animalEntity });
-
-                for (int j = 0; j < spawn.animal.spawnAmmount; j++)
-                {
-                    // Instantiate the animal prefab
-                    Entity newAnimal = entityManager.Instantiate(animalEntity);
-
-                    Terrain terrain = Terrain.activeTerrain;
-
-                    if (terrain != null)
-                    {
-                        // Get the terrain's size (width and length)
-                        float terrainWidth = terrain.terrainData.size.x;
-                        float terrainLength = terrain.terrainData.size.z;
-
-                        // Random position for spawning animals (within the terrain's x, z bounds)
-                        float x = UnityEngine.Random.Range(0f, terrainWidth);  // Random x position on the terrain
-                        float z = UnityEngine.Random.Range(0f, terrainLength); // Random z position on the terrain
-
-                        // Get the height of the terrain at the random x, z coordinates
-                        float y = terrain.SampleHeight(new Vector3(x, 0f, z));
-
-                        // Set the spawn position for the new animal (on the terrain surface)
-                        var spawnPosition = new float3(x, y, z);
-
-                        // Set the spawn position for the new animal
-                        entityManager.SetComponentData(newAnimal, new LocalTransform { Position = spawnPosition });
-
-                        // Add additional components as needed (e.g., Health, Movement, Lifespan, etc.)
-                        // Initialize health (half of the max health for babies)
-                        entityManager.AddComponentData(newAnimal, new HealthDamage { CurrentHealth = 50f, MaxHealth = 100f, MinDamage = 1f, MaxDamage = 5f });
-
-                        // Initialize movement (random direction, default speed)
-                        entityManager.AddComponentData(newAnimal, new Movement { Direction = UnityEngine.Random.onUnitSphere, Speed = 2f });
-
-                        // Add the lifespan (set to 0 age initially for new animals)
-                        entityManager.AddComponentData(newAnimal, new Lifespan { Age = 0f, MaxAge = 10f, HeroAge = 12f, LegendAge = 15f });
-
-                        // Set fertility state (initially non-fertile for babies)
-                        entityManager.AddComponentData(newAnimal, new ReproductionData { ReproductionTimer = 0f, FertilityWindow = new float2(0.5f, 5f) });
-
-                        // Optionally, assign the animal to a group (e.g., group 1 for a herd or pack)
-                        entityManager.AddComponentData(newAnimal, new GroupBehavior { GroupId = 1, GroupSize = 1, CohesionFactor = 1f });
-                    }
-                    else
-                    {
-                        Debug.LogError("NO TERRAIN DETECTED.");
-                    }
-
-                }
-
+                prefabBuffer.Add(new AnimalPrefabBuffer { Prefab = prefabEntity });
+                countBuffer.Add(new AnimalSpawnCountBuffer { Count = entry.spawnCount });
             }
+
+            // NOTE: No EntityManager.Instantiate() calls here! 
+            // This is purely data collection for runtime use.
         }
     }
 }

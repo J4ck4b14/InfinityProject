@@ -21,7 +21,7 @@ public class DayNightController : MonoBehaviour
 
         // fraction of the current year --> fraction of the day
         double fracDay = gt.TotalYears % 1.0;
-        // map 0-->1 to -90° (sunrise) through 270° (next sunrise)
+        // map 0-->1 to -90º (sunrise) through 270º (next sunrise)
         float angle = (float)(fracDay * 360.0 - 90.0);
         sun.transform.rotation = Quaternion.Euler(angle, 170f, 0f);
     }

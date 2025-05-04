@@ -1,67 +1,80 @@
 using InfinityProject.Time;
-using System;
 using Unity.Entities;
 using Unity.Mathematics;
 using Unity.Transforms;
-using UnityEngine;
 
+// 1. Reference the ECB System so we can playback safely at end of frame
 [UpdateInGroup(typeof(SimulationSystemGroup))]
+[RequireMatchingQueriesForUpdate]           // Ensures we only run when there *are* reproducing animals
 public partial class AnimalReproductionSystem : SystemBase
 {
+    // We’ll grab the ECB system once on Create
+    private BeginSimulationEntityCommandBufferSystem _ecbSystem;
+
+    protected override void OnCreate()
+    {
+        base.OnCreate();
+        _ecbSystem = World.GetOrCreateSystemManaged<BeginSimulationEntityCommandBufferSystem>();
+    }
+
     protected override void OnUpdate()
     {
-        // Grab the global time scale
+        // 2. Compute scaled years per frame exactly once
         var gt = SystemAPI.GetSingleton<GameTime>();
         double scale = TimeConfig.YearScale[gt.ScaleIndex];
-        double baseYearsPerSec = TimeConfig.BaseYearsPerSecond;
+        double baseY = TimeConfig.BaseYearsPerSecond;
+        float deltaYears = (float)(baseY * SystemAPI.Time.DeltaTime * scale);
 
-        // Compute delta years this frame
-        double dtYears = baseYearsPerSec * SystemAPI.Time.DeltaTime * scale;
-        float fYears = (float)dtYears;
+        // 3. Create a parallel ECB
+        var ecb = _ecbSystem.CreateCommandBuffer().AsParallelWriter();
 
-        var ecb = new EntityCommandBuffer(Unity.Collections.Allocator.Temp);
-
+        // 4. Capture the ECB and deltaYears into our job
         Entities
-        .WithName("AnimalReproduction")
-        .ForEach((Entity entity,
-                  ref ReproductionData rep,
-                  in HealthDamage health,
-                  in Lifespan life,
-                  in PrefabRef prefab,
-                  in LocalTransform xf) =>
-        {
-            // Decrement by scaled years
-            rep.ReproductionTimer -= fYears;
-
-            bool healthy = health.CurrentHealth > health.MaxHealth * 0.5f;
-            bool fertile = life.Age >= rep.FertilityWindow.x
-                          && life.Age <= rep.FertilityWindow.y;
-
-            if (rep.ReproductionTimer <= 0f && healthy && fertile)
+            .WithName("AnimalReproduction")
+            .ForEach((
+                Entity parentEntity,
+                int entityInQueryIndex,
+                ref ReproductionData rep,
+                in HealthDamage health,
+                in Lifespan life,
+                in global::PrefabRef prefab,
+                in LocalTransform xf
+            ) =>
             {
-                var baby = ecb.Instantiate(prefab.Prefab);
+                // decrement the timer
+                rep.ReproductionTimer -= deltaYears;
 
-                // position near parent
-                float3 offset = new float3(
-                    UnityEngine.Random.Range(-1f, 1f),
-                    0f,
-                    UnityEngine.Random.Range(-1f, 1f)
-                );
-                ecb.SetComponent(baby, new LocalTransform
+                bool healthy = health.CurrentHealth > health.MaxHealth * 0.5f;
+                bool fertile = life.Age >= rep.FertilityWindow.x
+                             && life.Age <= rep.FertilityWindow.y;
+
+                if (rep.ReproductionTimer <= 0f && healthy && fertile)
                 {
-                    Position = xf.Position + offset,
-                    Rotation = quaternion.identity,
-                    Scale = 1f
-                });
+                    // 5. Instantiate a baby via the ECB (no more 'Unity.Entities.Prefab' confusion)
+                    Entity baby = ecb.Instantiate(entityInQueryIndex, prefab.Prefab);
 
-                // reset timer (e.g. add original interval back)
-                rep.ReproductionTimer += rep.ReproductionTimer == 0f
-                    ? 1f
-                    : rep.ReproductionTimer;
-            }
-        }).Run();
+                    // 6. Position it near the parent
+                    float3 offset = new float3(
+                        UnityEngine.Random.Range(-1f, 1f),
+                        0f,
+                        UnityEngine.Random.Range(-1f, 1f)
+                    );
 
-        ecb.Playback(EntityManager);
-        ecb.Dispose();
+                    // We use SetComponent because LocalTransform is a chunk component
+                    ecb.SetComponent(entityInQueryIndex, baby, new LocalTransform
+                    {
+                        Position = xf.Position + offset,
+                        Rotation = xf.Rotation,
+                        Scale = xf.Scale
+                    });
+
+                    // 7. Reset the timer (assumes original interval stored elsewhere — you could cache it)
+                    rep.ReproductionTimer += math.max(rep.FertilityWindow.y - rep.FertilityWindow.x, 1f);
+                }
+            })
+            .ScheduleParallel();
+
+        // 8. Tell the ECB system when we’re done scheduling
+        _ecbSystem.AddJobHandleForProducer(Dependency);
     }
 }

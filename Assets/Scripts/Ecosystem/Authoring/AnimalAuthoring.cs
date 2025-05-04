@@ -48,6 +48,8 @@ public class AnimalAuthoring : MonoBehaviour
             // Get the Entity for this GameObject
             var entity = GetEntity(TransformUsageFlags.Dynamic);
 
+            AddComponent(entity, new PrefabRef { Prefab = entity });
+
             // Add core components for the animal entity
             AddComponent(entity, new HealthDamage
             {

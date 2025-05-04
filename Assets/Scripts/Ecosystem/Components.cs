@@ -136,3 +136,11 @@ public struct PackSize : IComponentData
 {
     public int Value;  // Number of predators in the pack (relevant for pack-based behavior)
 }
+
+/// <summary>
+/// Holds the prefab-entity to use when spawning offspring.
+/// </summary>
+public struct PrefabRef : IComponentData
+{
+    public Entity Prefab;
+}
