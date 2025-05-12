@@ -2,7 +2,7 @@ namespace InfinityProject.Time
 {
     /// <summary>
     /// Configuration for how fast in-game time passes relative to real time.
-    /// </summary>
+    /// </summary 
     public static class TimeConfig
     {
         /// <summary>

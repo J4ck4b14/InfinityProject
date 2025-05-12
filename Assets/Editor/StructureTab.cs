@@ -163,10 +163,11 @@ public class StructureTab
 
         // Raycast against terrain
         if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, mask) &&
-            e.type == EventType.MouseDown && e.button == 0 && e.shift)
-        {
-            // Drawing mode
-            if (isDrawing)
+            e.type == UnityEngine.EventType.KeyDown && e.keyCode == KeyCode.Return)
+
+            {
+                // Drawing mode
+                if (isDrawing)
             {
                 // Close polygon if near start
                 if (polygonPoints.Count > 2 &&
@@ -202,7 +203,7 @@ public class StructureTab
         }
 
         // Finalize on Enter
-        if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Return && polygonPoints.Count > 2)
+        if (e.type == UnityEngine.EventType.KeyDown && e.keyCode == KeyCode.Return)
         {
             isDrawing = false;
             SceneView.duringSceneGui -= OnSceneGUI;

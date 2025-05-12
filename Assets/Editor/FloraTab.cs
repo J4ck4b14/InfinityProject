@@ -102,7 +102,7 @@ public class FloraTab
         if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, mask))
         {
             // Add vertex on Shift + Left-click
-            if (e.type == EventType.MouseDown && e.button == 0 && e.shift)
+            if (e.type == UnityEngine.EventType.MouseDown && e.button == 0)
             {
                 polygonPoints.Add(hit.point);
                 e.Use();
@@ -120,7 +120,7 @@ public class FloraTab
         Physics.queriesHitBackfaces = prevBack;
 
         // Close polygon on Enter if at least 3 points
-        if (e.type == EventType.KeyDown && e.keyCode == KeyCode.Return && polygonPoints.Count > 2)
+        if (e.type == UnityEngine.EventType.KeyDown && e.keyCode == KeyCode.Return)
         {
             isDrawing = false;
             SceneView.duringSceneGui -= OnSceneGUI;

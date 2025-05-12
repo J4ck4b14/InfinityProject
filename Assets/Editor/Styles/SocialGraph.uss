@@ -1,0 +1,115 @@
+/* ===============================
+   Base Node Styling
+   =============================== */
+
+/* General layout for all nodes */
+.graph-node {
+    padding: 6px;
+    border-width: 2px;
+    border-radius: 6px;
+    -unity-font-style: normal;
+    background-color: #2a2a2a;
+    font-size: 12px;
+}
+
+/* Citizen node: like a paper sheet */
+.citizen-node {
+    background-color: #f3f1e8;
+    border-color: #ccc;
+}
+
+/* Village node: like a wood panel */
+.village-node {
+    background-color: #5e4429;
+    border-color: #b08855;
+}
+
+/* ===============================
+   Fonts and Text
+   =============================== */
+
+.bold-label {
+    font-size: 13px;
+    -unity-font-style: bold;
+}
+
+.normal-label {
+    font-size: 11px;
+    -unity-font-style: normal;
+}
+
+/* ===============================
+   Port Styling
+   =============================== */
+
+.input-port {
+    background-color: #4477cc;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+.output-port {
+    background-color: #cc7744;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+}
+
+/* Minimal label on ports */
+.port-label {
+    visibility: hidden;
+    margin-left: 0;
+    margin-right: 0;
+}
+
+/* ===============================
+   Edge Styling (via C# classes)
+   =============================== */
+
+/* Default connection style */
+.default-edge {
+    border-color: #888;
+    border-width: 1px;
+}
+
+/* Dashed = no selection */
+.edge-dashed {
+
+}
+
+/* Dotted = other citizens when someone is selected */
+.edge-dotted {
+
+}
+
+/* Solid = direct connections from selected citizen */
+.edge-solid {
+
+}
+
+/* Glowing edge (strong, stable) */
+.edge-glow {
+    border-color: #00ff88;
+    border-width: 2px;
+    /* Visual "glow" needs to be simulated in C# using edgeControl tweaks or blur */
+}
+
+/* Weak/fragile edge — thinning simulated in C# */
+.edge-weak {
+    border-color: #ffaaaa;
+    border-width: 1px;
+}
+
+/* ===============================
+   Guild Group Areas
+   =============================== */
+
+.guild-area {
+    background-color: rgba(128, 128, 255, 0.25); /* Default blue; override in C# per-guild */
+    border-radius: 12px;
+    border-color: rgba(80, 80, 150, 0.3);
+    border-width: 1px;
+    padding: 10px;
+    position: absolute;
+}
