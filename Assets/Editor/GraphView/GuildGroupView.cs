@@ -32,4 +32,5 @@ public class GuildGroupView : GraphElement
         style.width = bounds.width;
         style.height = bounds.height;
     }
+
 }

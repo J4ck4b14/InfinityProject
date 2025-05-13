@@ -2,7 +2,9 @@ using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.Experimental.GraphView;
 using UnityEngine;
-using UnityEngine.UIElements; 
+using UnityEngine.UIElements;
+using System;
+using Random = UnityEngine.Random;
 
 /// <summary>
 /// Custom GraphView responsible for rendering and managing the social node network.
@@ -11,6 +13,7 @@ public class SocialGraphView : GraphView
 {
     private CitizenNode selectedCitizen;
     private List<Edge> allEdges = new();
+    private CitizenInteractionController interactionController = new CitizenInteractionController();
 
     public SocialGraphView()
     {
@@ -248,12 +251,6 @@ public class SocialGraphView : GraphView
                Mathf.Abs(profile.justice);
     }
 
-    public void SetSelectedCitizen(CitizenNode citizen)
-    {
-        selectedCitizen = citizen;
-        UpdateEdgeStyles();
-    }
-
     private void UpdateEdgeStyles()
     {
         foreach (var edge in allEdges)
@@ -283,5 +280,23 @@ public class SocialGraphView : GraphView
                 edge.AddToClassList("edge-dotted");
             }
         }
+    }
+
+    public void SetSelectedCitizen(CitizenNode node)
+    {
+        selectedCitizen = node;
+        interactionController.SetInitiator(node);
+        UpdateEdgeStyles();
+    }
+
+    public void SetOnActionChosen(Action<MockCitizen, MockCitizen, string> callback)
+    {
+        interactionController.SetOnActionChosen(callback);
+    }
+
+
+    public void TryInitiateInteraction(CitizenNode target, Vector2 screenPos)
+    {
+        interactionController.TryShowContextMenu(target, screenPos);
     }
 }

@@ -55,11 +55,19 @@ public class MockCitizen
     public int age;
     public int socialRank; // 0 = peasant, 10 = royalty
     public string guild; // name of the guild this citizen belongs to
+    public string gender;
+    public string profession;
+    public string status;
+    public float money;
 
+    //--------------------------------------
+    //                NEEDS                 
+    //--------------------------------------
     public float hunger;        // [0–1]
     public float sleepiness;    // [0–1]
     public float safety;        // [0–1]
     public float socialContact; // [0–1]
+
 
     public MockEthicalProfile ethics;
 
