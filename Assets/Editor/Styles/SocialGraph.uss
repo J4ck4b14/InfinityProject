@@ -113,3 +113,41 @@
     padding: 10px;
     position: absolute;
 }
+
+/* ===============================
+   Village-to-Village Edge Styling
+   =============================== */
+
+.edge-hostile {
+    stroke: #cc3333;
+    stroke-width: 4px;
+}
+
+.edge-neutral {
+    stroke: #999999;
+    stroke-width: 3px;
+}
+
+.edge-friendly {
+    stroke: #33cc33;
+    stroke-width: 4px;
+}
+
+.edge-commerce {
+    stroke: #ffcc33;
+    stroke-dasharray: 4 2;
+    stroke-width: 2px;
+}
+
+/* Optional: glowing animation for extreme trust */
+.edge-glow {
+    stroke: #00ff88;
+    stroke-width: 5px;
+    animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%   { stroke-opacity: 0.5; }
+    50%  { stroke-opacity: 1.0; }
+    100% { stroke-opacity: 0.5; }
+}

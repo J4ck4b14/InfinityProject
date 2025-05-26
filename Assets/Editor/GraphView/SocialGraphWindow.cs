@@ -1,9 +1,10 @@
+﻿using System.Collections.Generic;
+using System.Linq;
 using UnityEditor;
 using UnityEditor.Experimental.GraphView;
+using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.UIElements;
-using System.Collections.Generic;
-using UnityEditor.UIElements;
 
 /// <summary>
 /// Custom Unity Editor tool for visualizing the social structure of villages and citizens.
@@ -11,6 +12,13 @@ using UnityEditor.UIElements;
 /// </summary>
 public class SocialGraphWindow : EditorWindow
 {
+    public enum GraphMode
+    {
+        Global,
+        SingleVillage,
+        Settlements
+    }
+
     [SerializeField] private MockSocialData mockData;
 
     private SocialGraphView graphView;
@@ -65,86 +73,90 @@ public class SocialGraphWindow : EditorWindow
     /// Temporary placeholder graph using mock village nodes and dummy connections.
     /// Later this will be replaced by ECS-based data queries.
     /// </summary>
-    private void GenerateMockGraph()
+    private void GenerateMockGraph(GraphMode mode = GraphMode.Global, string villageFilter = null)
     {
-        if (mockData == null)
-        {
-            Debug.LogWarning("MockSocialData not assigned.");
-            return;
-        }
+        if (mockData == null) return;
 
         graphView.ClearGraph();
 
         var citizenLookup = new Dictionary<string, CitizenNode>();
         var citizenNodes = new List<CitizenNode>();
 
-        // Create village and citizen nodes
-        foreach (var village in mockData.villages)
+        var villagesToLoad = mode switch
         {
-            var villageNode = graphView.CreateVillageNode(village.villageName, village.editorPosition);
+            GraphMode.Global => mockData.villages,
+            GraphMode.SingleVillage => mockData.villages.Where(v => v.villageName == villageFilter).ToList(),
+            _ => new List<MockVillage>()
+        };
 
-            foreach (var citizen in village.citizens)
+        foreach (var village in villagesToLoad)
+        {
+            // Only create VillageNode in Global view (optional)
+            if (mode == GraphMode.Global)
             {
-                var citizenNode = graphView.CreateCitizenNode(citizen, citizen.editorPosition);
-                graphView.ConnectNodes(villageNode, citizenNode, 1f);
+                var vNode = graphView.CreateVillageNode(village.villageName, village.editorPosition);
+                vNode.title = village.villageName;
+            }
 
-                if (string.IsNullOrWhiteSpace(citizen.name))
-                {
-                    Debug.LogWarning($"Citizen at position {citizen.editorPosition} has no name.");
-                    continue; // skip adding a nameless citizen
-                }
+            float radius = 300f;
+            Vector2 center = village.editorPosition + new Vector2(0f, 200f);
 
-                if (citizenLookup.ContainsKey(citizen.name))
-                {
-                    Debug.LogWarning($"Duplicate citizen name detected: {citizen.name}");
-                }
-                else
+            int count = village.citizens.Count;
+            float angleStep = 360f / Mathf.Max(count, 1);
+
+            for (int i = 0; i < count; i++)
+            {
+                var citizen = village.citizens[i];
+                if (citizen == null || string.IsNullOrWhiteSpace(citizen.guid)) continue;
+
+                float angle = angleStep * i * Mathf.Deg2Rad;
+                Vector2 pos = center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius;
+
+                citizen.editorPosition = pos;
+
+                var citizenNode = graphView.CreateCitizenNode(citizen, pos);
+                if (citizenNode == null) continue;
+
+                if (!citizenLookup.ContainsKey(citizen.guid))
                 {
                     citizenLookup[citizen.guid] = citizenNode;
                     citizenNodes.Add(citizenNode);
                 }
-                citizenNodes.Add(citizenNode);
             }
         }
 
-        // Create connections between citizens
-        foreach (var village in mockData.villages)
+        // Citizen-to-citizen edges
+        foreach (var village in villagesToLoad)
         {
             foreach (var citizen in village.citizens)
             {
-                if (!citizenLookup.TryGetValue(citizen.name, out var fromNode)) continue;
+                if (!citizenLookup.TryGetValue(citizen.guid, out var fromNode)) continue;
 
                 foreach (var bridge in citizen.connections)
                 {
-                    if (string.IsNullOrWhiteSpace(bridge.targetGuid)) continue;
-
                     if (citizenLookup.TryGetValue(bridge.targetGuid, out var toNode))
                     {
-                        graphView.ConnectNodes(fromNode, toNode, bridge.relationshipStrength);
+                        graphView.ConnectCitizens(fromNode, toNode, bridge.relationshipStrength, bridge.reputation);
                     }
                 }
             }
         }
 
-        // Create guild groups
-        graphView.CreateGuildGroups(citizenNodes);
-
-        if (mockData.villages == null || mockData.villages.Count == 0)
+        if (mode == GraphMode.SingleVillage)
         {
-            var testVillage = new MockVillage
+            int count = citizenNodes.Count;
+            float radius = 300f;
+            Vector2 center = new Vector2(600f, 400f); // You can tweak this for visual balance
+
+            for (int i = 0; i < count; i++)
             {
-                villageName = "Test Village",
-                editorPosition = new Vector2(200, 200),
-                citizens = new System.Collections.Generic.List<MockCitizen>()
-            };
-
-            var globalPool = new List<MockCitizen>();
-            testVillage.Randomize(globalPool); // call the Randomize method we defined
-
-            mockData.villages.Add(testVillage);
+                float angle = 2 * Mathf.PI * i / count;
+                Vector2 pos = center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius;
+                citizenNodes[i].SetPosition(new Rect(pos, citizenNodes[i].GetPosition().size));
+            }
         }
-
     }
+
 
     private void CreateToolbar()
     {
@@ -169,6 +181,54 @@ public class SocialGraphWindow : EditorWindow
         { text = "Save Snapshot" };
 
         toolbar.Add(saveButton);
+
+        // Add dropdown to filter by village
+        var villageDropdown = new ToolbarMenu
+        {
+            text = "Select Village"
+        };
+
+        // Settlements = only village-to-village
+        villageDropdown.menu.AppendAction("Settlements", _ => GenerateVillageRelationGraph());
+
+        // Global = all villages, all citizens
+        villageDropdown.menu.AppendAction("Global", _ => GenerateMockGraph(GraphMode.Global));
+
+        foreach (var village in mockData.villages)
+        {
+            string name = village.villageName;
+            villageDropdown.menu.AppendAction(name, _ => GenerateMockGraph(GraphMode.SingleVillage, name));
+        }
+
+        // Add each village from the loaded mock data
+        if (mockData != null)
+        {
+            foreach (var village in mockData.villages)
+            {
+                string name = village.villageName;
+                villageDropdown.menu.AppendAction(name, _ => GenerateMockGraph(name));
+            }
+        }
+
+        toolbar.Add(villageDropdown);
+
+        // Add a button to clear the graph
+        var clearButton = new Button(() =>
+        {
+            graphView.ClearGraph();
+            Debug.Log("Graph cleared.");
+        })
+        { text = "Clear Graph" };
+
+        toolbar.Add(clearButton);
+
+        var legend = new Label("🟢 Trust  ⚪ Neutral  🔴 Hostility   🟡 Trade");
+        legend.style.unityFontStyleAndWeight = FontStyle.Bold;
+        legend.style.fontSize = 12;
+        legend.style.marginLeft = 20;
+        legend.style.color = Color.white;
+
+        toolbar.Add(legend);
     }
 
     private void RandomizeAllMockData()
@@ -183,11 +243,30 @@ public class SocialGraphWindow : EditorWindow
         int villageCount = Random.Range(3, 6);
         var globalPool = new List<MockCitizen>();
 
+        // Prepare a pool of unique names
+        var possibleNames = new List<string>
+        {
+            "Ashenreach", "Frostmere", "Duskwatch", "Briarhollow",
+            "Sunhelm", "Mournstead", "Dawnrise", "Stonebrook",
+            "Hollowshade", "Emberhold"
+        };
+
         for (int i = 0; i < villageCount; i++)
         {
+            if (possibleNames.Count == 0)
+            {
+                Debug.LogWarning("Ran out of unique village names!");
+                break;
+            }
+
+            // Pick a name randomly from remaining options and remove it
+            int index = Random.Range(0, possibleNames.Count);
+            string villageName = possibleNames[index];
+            possibleNames.RemoveAt(index);
+
             var village = new MockVillage
             {
-                villageName = $"Village_{i + 1}",
+                villageName = villageName,
                 editorPosition = new Vector2(300 * i, 100 * Random.Range(0, 3)),
                 citizens = new List<MockCitizen>()
             };
@@ -207,7 +286,18 @@ public class SocialGraphWindow : EditorWindow
             mockData.villages.Add(village);
         }
 
-        Debug.Log($"[Randomize All] Generated {villageCount} villages and {globalPool.Count} citizens.");
+        Debug.Log($"[Randomize All] Generated {mockData.villages.Count} villages and {globalPool.Count} citizens.");
+
+        foreach (var v in mockData.villages)
+        {
+            foreach (var c in v.citizens)
+            {
+                if (string.IsNullOrWhiteSpace(c.guid))
+                    Debug.LogWarning($"! Citizen with missing GUID in {v.villageName}");
+                if (string.IsNullOrWhiteSpace(c.name))
+                    Debug.LogWarning($"! Citizen with missing name in {v.villageName}");
+            }
+        }
     }
 
     private void SaveMockDataSnapshot()
@@ -271,4 +361,161 @@ public class SocialGraphWindow : EditorWindow
             connections = new List<MockBridge>(original.connections) // shallow copy is enough
         };
     }
+
+    private void GenerateMockGraph(string villageFilter)
+    {
+        if (mockData == null) return;
+
+        graphView.ClearGraph();
+
+        var citizenLookup = new Dictionary<string, CitizenNode>();
+        var citizenNodes = new List<CitizenNode>();
+
+        var filteredVillages = string.IsNullOrEmpty(villageFilter)
+            ? mockData.villages
+            : mockData.villages.FindAll(v => v.villageName == villageFilter);
+
+        foreach (var village in filteredVillages)
+        {
+            VillageNode villageNode = null;
+
+            if (string.IsNullOrEmpty(villageFilter)) // global view
+                villageNode = graphView.CreateVillageNode(village.villageName, village.editorPosition);
+
+            foreach (var citizen in village.citizens)
+            {
+                var citizenNode = graphView.CreateCitizenNode(citizen, citizen.editorPosition);
+
+                if (!citizenLookup.ContainsKey(citizen.guid))
+                {
+                    citizenLookup[citizen.guid] = citizenNode;
+                    citizenNodes.Add(citizenNode);
+                }
+            }
+        }
+
+        foreach (var village in filteredVillages)
+        {
+            foreach (var citizen in village.citizens)
+            {
+                if (!citizenLookup.TryGetValue(citizen.guid, out var fromNode)) continue;
+
+                foreach (var bridge in citizen.connections)
+                {
+                    if (citizenLookup.TryGetValue(bridge.targetGuid, out var toNode))
+                    {
+                        graphView.ConnectCitizens(fromNode, toNode, bridge.relationshipStrength, bridge.reputation);
+                    }
+                }
+            }
+        }
+
+        graphView.CreateGuildGroups(citizenNodes);
+    }
+
+    private void GenerateVillageRelationGraph()
+    {
+        if (mockData == null || mockData.villages == null) return;
+
+        graphView.ClearGraph();
+
+        // Create all village nodes and store them
+        Dictionary<string, VillageNode> villageNodes = new();
+        foreach (var village in mockData.villages)
+        {
+            var node = graphView.CreateVillageNode(village.villageName, village.editorPosition);
+            villageNodes[village.villageName] = node;
+
+        }
+
+        // Analyze inter-village links via citizen connections
+        Dictionary<(string from, string to), (float trust, int commerce)> links = new();
+
+        foreach (var fromVillage in mockData.villages)
+        {
+            foreach (var citizen in fromVillage.citizens)
+            {
+                foreach (var bridge in citizen.connections)
+                {
+                    var targetCitizen = mockData.villages
+                        .SelectMany(v => v.citizens)
+                        .FirstOrDefault(c => c.guid == bridge.targetGuid);
+
+                    if (targetCitizen == null) continue;
+
+                    var toVillage = mockData.villages.FirstOrDefault(v => v.citizens.Contains(targetCitizen));
+                    if (toVillage == null || toVillage == fromVillage) continue;
+
+                    if (string.IsNullOrWhiteSpace(fromVillage.villageName) ||
+                        toVillage == null ||
+                        string.IsNullOrWhiteSpace(toVillage.villageName) ||
+                        toVillage == fromVillage)
+                        continue;
+
+                    var key = (from: fromVillage.villageName, to: toVillage.villageName);
+                    if (!links.ContainsKey(key))
+                        links[key] = (0f, 0);
+
+                    links[key] = (
+                        links[key].trust + bridge.reputation.care + bridge.reputation.honesty + bridge.reputation.loyalty,
+                        links[key].commerce + 1
+                    );
+                }
+            }
+        }
+
+        // Create edges based on inter-village data
+        foreach (var kvp in links)
+        {
+            if (!villageNodes.ContainsKey(kvp.Key.from) || !villageNodes.ContainsKey(kvp.Key.to)) continue;
+
+            float avgTrust = kvp.Value.trust / Mathf.Max(1f, kvp.Value.commerce);
+            float weight = Mathf.Clamp01(avgTrust * 0.2f + 0.5f); // Normalize trust to [0,1]
+
+            var from = villageNodes[kvp.Key.from];
+            var to = villageNodes[kvp.Key.to];
+
+            // Determine color
+            Color edgeColor;
+            bool hasTrade = kvp.Value.commerce > 0;
+
+            if (avgTrust >= 0.5f)
+                edgeColor = Color.Lerp(Color.green, new Color(0f, 0.3f, 0f), 1 - avgTrust);
+            else
+                edgeColor = Color.Lerp(Color.red, new Color(0.3f, 0f, 0f), 1 - avgTrust);
+
+            if (hasTrade)
+            {
+                graphView.ConnectVillages(from, to, SocialGraphView.VillageConnectionType.Commerce);
+            }
+
+            // DEBUG TEST: force diverse relationships
+            if (villageNodes.Count >= 4)
+            {
+                var nodes = villageNodes.Values.ToList();
+
+                graphView.ConnectVillages(nodes[0], nodes[1], SocialGraphView.VillageConnectionType.Relationship, -0.4f); // hostile
+                graphView.ConnectVillages(nodes[2], nodes[3], SocialGraphView.VillageConnectionType.Relationship, 0f);    // neutral
+            }
+
+            // Then connect with color
+            graphView.ConnectVillages(from, to, SocialGraphView.VillageConnectionType.Relationship, weight);
+        }
+
+        Vector2 center = new Vector2(800, 400);
+        float radius = 350f;
+        int count = villageNodes.Count;
+        float angleStep = 2 * Mathf.PI / count;
+
+        int i = 0;
+        foreach (var node in villageNodes.Values)
+        {
+            float angle = i * angleStep;
+            Vector2 pos = center + new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * radius;
+            node.SetPosition(new Rect(pos, node.GetPosition().size));
+            i++;
+        }
+
+    }
+
 }

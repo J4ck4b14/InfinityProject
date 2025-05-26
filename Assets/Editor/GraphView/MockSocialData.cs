@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using static DefaultGuilds;
 using Random = UnityEngine.Random;
 
 /// <summary>
@@ -104,7 +105,8 @@ public class MockCitizen
             temperance = RandomNormal()
         };
 
-        guild = DefaultGuilds.Names[Random.Range(0, DefaultGuilds.Names.Length)];
+        profession = GuildLogic.PickRandomProfession();
+        guild = GuildLogic.GetGuildForProfession(profession);
 
         // Assign colored placeholder portrait
         portrait = GenerateFlatColorTexture(Random.ColorHSV(0f, 1f, 0.4f, 1f, 0.6f, 1f));
@@ -242,5 +244,56 @@ public static class DefaultGuilds
         "Crimson Ledger",
         "Verdant Bloom"
     };
+
+    public static class GuildLogic
+    {
+        public static readonly string[] Professions = new[]
+        {
+        "Smith",
+        "Hunter",
+        "Doctor",
+        "Herbalist",
+        "Butcher",
+        "Farmer",
+        "Scholar",
+        "Priest",
+        "Guard",
+        "Merchant",
+        "Courier",
+        "Sellsword",
+        "Bard",
+        "Unemployed"
+        };
+
+        public static readonly Dictionary<string, List<string>> GuildMatches = new()
+        {
+        { "Smith",       new() { "The Iron Veil", "Circle of Embers" } },
+        { "Hunter",      new() { "Pale Fang", "Verdant Bloom" } },
+        { "Doctor",      new() { "Verdant Bloom", "Pale Fang", "The Rooted Maw", "Unaffiliated" } },
+        { "Herbalist",   new() { "Verdant Bloom", "Circle of Embers" } },
+        { "Butcher",     new() { "The Rooted Maw", "Crimson Ledger" } },
+        { "Farmer",      new() { "Verdant Bloom", "Crimson Ledger", "Unaffiliated" } },
+        { "Scholar",     new() { "Circle of Embers", "Crimson Ledger" } },
+        { "Priest",      new() { "Circle of Embers", "The Iron Veil", "The Oathbound" } },
+        { "Guard",       new() { "The Iron Veil", "Pale Fang", "The Oathbound" } },
+        { "Merchant",    new() { "Crimson Ledger", "Wandering Ash" } },
+        { "Courier",     new() { "Wandering Ash", "Crimson Ledger", "Pale Fang" } },
+        { "Sellsword",   new() { "Pale Fang", "The Iron Veil", "Unaffiliated" } },
+        { "Bard",        new() { "Wandering Ash", "Circle of Embers", "Unaffiliated" } },
+        { "Unemployed",  new() { "Pale Fang", "Wandering Ash", "Unaffiliated" } }
+        };
+
+        public static string GetGuildForProfession(string profession)
+        {
+            if (!GuildMatches.TryGetValue(profession, out var possibleGuilds))
+                return "Unaffiliated";
+            return possibleGuilds[UnityEngine.Random.Range(0, possibleGuilds.Count)];
+        }
+
+        public static string PickRandomProfession()
+        {
+            return Professions[UnityEngine.Random.Range(0, Professions.Length)];
+        }
+    }
 }
 

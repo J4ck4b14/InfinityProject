@@ -1,10 +1,11 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using UnityEditor;
 using UnityEditor.Experimental.GraphView;
 using UnityEngine;
 using UnityEngine.UIElements;
 using System;
 using Random = UnityEngine.Random;
+using System.Linq;
 
 /// <summary>
 /// Custom GraphView responsible for rendering and managing the social node network.
@@ -61,47 +62,132 @@ public class SocialGraphView : GraphView
         return node;
     }
 
-    /// <summary>
-    /// Creates an edge between two nodes, visually representing a relationship.
-    /// </summary>
-    public void ConnectNodes(Node from, Node to, float strength)
+    public void ConnectCitizens(CitizenNode source, CitizenNode target, float strength, MockEthicalProfile profile)
     {
-        // Buscar autom�ticamente el primer puerto de salida y entrada
-        var outPort = from.outputContainer.Q<Port>();
-        var inPort = to.inputContainer.Q<Port>();
+        if (source == null || target == null || source == target)
+            return;
 
-        if (outPort == null || inPort == null)
+        var edge = source.opinionPort.ConnectTo(target.targetPort);
+        if (edge == null) return;
+
+        // Assign metadata
+        edge.userData = new { strength, profile };
+        AddElement(edge);
+        allEdges.Add(edge);
+
+        // Compute friendliness from profile
+        float friendliness = (profile.care + profile.honesty + profile.loyalty + profile.respect + profile.temperance) / 5f;
+        Color color = friendliness > 0
+            ? Color.Lerp(Color.gray, new Color(0f, 0.6f, 0f), friendliness) // greenish
+            : Color.Lerp(Color.gray, new Color(0.6f, 0f, 0f), -friendliness); // reddish
+
+        edge.edgeControl.edgeWidth = (int)Mathf.Lerp(1f, 4f, Mathf.Abs(strength));
+        edge.edgeControl.inputColor = color;
+        edge.edgeControl.outputColor = color;
+    }
+
+    public enum VillageConnectionType
+    {
+        Relationship,
+        Commerce
+    }
+
+    /// <summary>
+    /// Connects two village nodes using either trust (float) or trade (string) edges.
+    /// </summary>
+    public void ConnectVillages(VillageNode from, VillageNode to, VillageConnectionType type, float weight = 1f, Color? colorOverride = null)
+    {
+        if (from == null || to == null || from == to)
         {
-            Debug.LogWarning($"No se encontraron puertos v�lidos en nodos '{from.title}' o '{to.title}'.");
+            Debug.LogWarning("ConnectVillages: invalid source/target.");
             return;
         }
 
-        var edge = outPort.ConnectTo(inPort);
-        AddElement(edge);
+        Port fromPort = null;
+        Port toPort = null;
 
-        // Assume citizen nodes store the reputation
-        if (from is CitizenNode fromC && to is CitizenNode toC)
+        switch (type)
         {
-            var bridge = fromC.mockData.connections.Find(b => b.targetGuid == toC.mockData.name);
-            if (bridge != null)
-            {
-                StyleEdgeByReputation(edge, bridge.relationshipStrength, bridge.reputation);
-            }
+            case VillageConnectionType.Relationship:
+                fromPort = from.relationshipOutput;
+                toPort = to.relationshipInput;
+                break;
+
+            case VillageConnectionType.Commerce:
+                fromPort = from.commerceOutput;
+                toPort = to.commerceInput;
+                break;
+
+            default:
+                Debug.LogWarning("Unknown edge type.");
+                return;
         }
 
-        // Estilizado visual
-        edge.edgeControl.edgeWidth = (int)Mathf.Lerp(1f, 5f, strength);
-        edge.style.borderTopColor = Color.Lerp(Color.red, Color.green, strength);
-        edge.style.borderBottomColor = Color.Lerp(Color.red, Color.green, strength);
-        edge.style.borderLeftColor = Color.Lerp(Color.red, Color.green, strength);
-        edge.style.borderRightColor = Color.Lerp(Color.red, Color.green, strength);
+        if (fromPort == null || toPort == null)
+        {
+            Debug.LogWarning($"Missing port(s) for {type} edge.");
+            return;
+        }
 
-        allEdges.Add(edge);
+        // Create custom edge with color and thickness
+        var edge = new ColoredEdge
+        {
+            output = fromPort,
+            input = toPort,
+            edgeColor = GetEdgeColor(type, weight),
+            edgeThickness = type == VillageConnectionType.Commerce
+        ? 2f
+        : Mathf.Lerp(2f, 8f, Mathf.Clamp01(Mathf.Abs(weight))),
+            dashed = type == VillageConnectionType.Commerce
+        };
+
+        edge.input.Connect(edge);
+        edge.output.Connect(edge);
+        AddElement(edge);
+        edge.edgeControl.visible = false;
+
+        // Defer styling until edgeControl is ready
+        edge.ApplyOverlayVisual(this);
+
+        if (type == VillageConnectionType.Relationship)
+        {
+            edge.EnableInteractiveTrustChange(this, newTrust =>
+            {
+                edge.edgeColor = GetEdgeColor(type, newTrust);
+                edge.edgeThickness = Mathf.Lerp(2f, 8f, Mathf.Abs(newTrust));
+                edge.ApplyOverlayVisual(this); // redraw overlay
+                Debug.Log($"📝 Updated trust: {from.title} → {to.title} = {newTrust:F2}");
+            });
+        }
+
+        edge.tooltip = type == VillageConnectionType.Commerce
+            ? $"Trade route: {from.title} → {to.title}"
+            : $"Trust: {weight:F2} ({from.title} → {to.title})";
+
+        Debug.Log($"✔️ {type} edge created: {from.title} → {to.title} (w={weight:F2})");
     }
 
     public CitizenNode CreateCitizenNode(MockCitizen citizen, Vector2 position)
     {
+        if (citizen == null)
+        {
+            Debug.LogWarning("X CreateCitizenNode: Citizen is null.");
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(citizen.guid))
+        {
+            Debug.LogWarning($"X CreateCitizenNode: Citizen '{citizen.name}' has no valid GUID.");
+            return null;
+        }
+
         var node = new CitizenNode(citizen);
+        if (node == null)
+        {
+            Debug.LogWarning($"X CreateCitizenNode: Failed to instantiate CitizenNode for {citizen.name}.");
+            return null;
+        }
+
         node.SetPosition(new Rect(position, new Vector2(220, 130)));
         node.AddToClassList("citizen-node");
         AddElement(node);
@@ -284,8 +370,17 @@ public class SocialGraphView : GraphView
 
     public void SetSelectedCitizen(CitizenNode node)
     {
+        // Deselect previous
+        if (selectedCitizen != null)
+            selectedCitizen.SetSelected(false);
+
         selectedCitizen = node;
         interactionController.SetInitiator(node);
+
+        // Select new
+        if (selectedCitizen != null)
+            selectedCitizen.SetSelected(true);
+
         UpdateEdgeStyles();
     }
 
@@ -299,4 +394,49 @@ public class SocialGraphView : GraphView
     {
         interactionController.TryShowContextMenu(target, screenPos);
     }
+
+    private Color GetEdgeColor(VillageConnectionType type, float weight)
+    {
+        if (type == VillageConnectionType.Commerce)
+            return new Color(1f, 0.85f, 0.1f); // Yellow
+
+        if (Mathf.Abs(weight) > 0.9f)
+            return new Color(0.0f, 1.0f, 0.55f); // Bright green for strong affinity
+        else if (weight < -0.3f)
+            return new Color(0.85f, 0.2f, 0.2f); // Red
+        else if (weight > 0.3f)
+            return new Color(0.2f, 0.85f, 0.2f); // Green
+        else
+            return new Color(0.6f, 0.6f, 0.6f); // Gray for neutral
+    }
+
+    public List<VillageNode> GetAllVillageNodes()
+    {
+        return graphElements
+            .OfType<VillageNode>()
+            .ToList();
+    }
+    public List<CitizenNode> GetAllCitizenNodes()
+    {
+        return graphElements
+            .OfType<CitizenNode>()
+            .ToList();
+    }
+
+    public void UpdateVillageRelationship(VillageNode from, VillageNode to, float trust)
+    {
+        // Remove any existing edge between these two
+        var existing = graphElements
+            .OfType<ColoredEdge>()
+            .FirstOrDefault(e => e.output.node == from && e.input.node == to);
+
+        if (existing != null)
+        {
+            RemoveElement(existing);
+        }
+
+        // Reconnect with new value
+        ConnectVillages(from, to, VillageConnectionType.Relationship, trust);
+    }
+
 }

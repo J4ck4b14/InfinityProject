@@ -13,15 +13,21 @@ public class CitizenNode : Node
     private VisualElement infoContainer;
     private VisualElement moneyContainer;
     private VisualElement ethicsPanel;
+    private VisualElement ethicsPanelWrapper;
 
-    private Port opinionPort; // What this citizen thinks of others (dynamic position)
-    private Port targetPort;  // What others think of this citizen (dynamic position)
+    public Port opinionPort; // What this citizen thinks of others (dynamic position)
+    public Port targetPort;  // What others think of this citizen (dynamic position)
 
     private const float PortraitSize = 40f;
 
     public CitizenNode(MockCitizen citizen, bool isSelected = false)
     {
         mockData = citizen;
+        // Match background to guild color
+        if (mockData.guild == "Unaffiliated")
+            style.backgroundColor = new StyleColor(new Color(0.6f, 0.6f, 0.6f, 1f)); // grey
+        else
+            style.backgroundColor = SocialGraphView.GuildVisuals.GetGuildColor(mockData.guild);
         title = string.Empty;
         name = $"Citizen_{citizen.guid}";
 
@@ -82,6 +88,10 @@ public class CitizenNode : Node
         ethicsPanel.style.paddingBottom = 4;
         ethicsPanel.style.flexDirection = FlexDirection.Column;
 
+        ethicsPanelWrapper = new VisualElement(); // <— wrapper that gets added/removed
+        ethicsPanelWrapper.style.marginTop = 4;
+        ethicsPanelWrapper.Add(ethicsPanel);
+
         if (isSelected)
         {
             AddEthicsSlider("Lawfulness", citizen.ethics.lawfulness);
@@ -94,17 +104,34 @@ public class CitizenNode : Node
             AddEthicsSlider("Respect", citizen.ethics.respect);
             AddEthicsSlider("Courage", citizen.ethics.courage);
             AddEthicsSlider("Temperance", citizen.ethics.temperance);
-            mainContainer.Add(ethicsPanel);
+            mainContainer.Add(ethicsPanelWrapper);
         }
 
         // Dynamic ports
         opinionPort = InstantiatePort(Orientation.Horizontal, Direction.Output, Port.Capacity.Multi, typeof(float));
-        opinionPort.portName = string.Empty;
-        targetPort = InstantiatePort(Orientation.Horizontal, Direction.Input, Port.Capacity.Multi, typeof(float));
-        targetPort.portName = string.Empty;
+        opinionPort.portName = "";
+        opinionPort.style.position = Position.Absolute;
+        opinionPort.style.left = style.width.value.value * 0.5f - 8f;
+        opinionPort.style.top = -10f;
+        opinionPort.portColor = Color.red;
+        Add(opinionPort);
+        outputContainer.Add(opinionPort);
 
-        AddDynamicPort(opinionPort, new Vector2(-5, 20));
-        AddDynamicPort(targetPort, new Vector2(style.width.value.value - 5, style.height.value.value - 30));
+        targetPort = InstantiatePort(Orientation.Horizontal, Direction.Input, Port.Capacity.Multi, typeof(float));
+        targetPort.portName = "";
+        targetPort.style.position = Position.Absolute;
+        targetPort.style.left = style.width.value.value * 0.5f - 8f;
+        targetPort.style.top = style.height.value.value - 10f;
+        targetPort.portColor = Color.blue;
+        Add(targetPort);
+        inputContainer.Add(targetPort);
+
+        RegisterCallback<MouseDownEvent>(evt =>
+        {
+            var graph = GetFirstAncestorOfType<SocialGraphView>();
+            if (evt.button == 0) graph?.SetSelectedCitizen(this);
+            else if (evt.button == 1) graph?.TryInitiateInteraction(this, evt.mousePosition);
+        });
 
         RefreshExpandedState();
         RefreshPorts();
@@ -135,6 +162,7 @@ public class CitizenNode : Node
     {
         var label = new Label(content);
         label.style.unityTextAlign = TextAnchor.MiddleLeft;
+        label.style.color = Color.black;
         label.style.fontSize = 11;
         infoContainer.Add(label);
     }
@@ -158,5 +186,35 @@ public class CitizenNode : Node
         int hash = mockData.guid.GetHashCode();
         Random.InitState(hash);
         return new Color(Random.value, Random.value, Random.value);
+    }
+
+    public void SetSelected(bool selected)
+    {
+        if (selected)
+        {
+            style.height = 300;
+            ethicsPanel.Clear();
+
+            AddEthicsSlider("Lawfulness", mockData.ethics.lawfulness);
+            AddEthicsSlider("Justice", mockData.ethics.justice);
+            AddEthicsSlider("Care", mockData.ethics.care);
+            AddEthicsSlider("Beneficence", mockData.ethics.beneficence);
+            AddEthicsSlider("Honesty", mockData.ethics.honesty);
+            AddEthicsSlider("Loyalty", mockData.ethics.loyalty);
+            AddEthicsSlider("Autonomy", mockData.ethics.autonomy);
+            AddEthicsSlider("Respect", mockData.ethics.respect);
+            AddEthicsSlider("Courage", mockData.ethics.courage);
+            AddEthicsSlider("Temperance", mockData.ethics.temperance);
+
+            if (!mainContainer.Contains(ethicsPanelWrapper))
+                mainContainer.Add(ethicsPanelWrapper);
+        }
+        else
+        {
+            style.height = 180;
+
+            if (ethicsPanelWrapper != null && ethicsPanelWrapper.parent == mainContainer)
+                mainContainer.Remove(ethicsPanelWrapper);
+        }
     }
 }
