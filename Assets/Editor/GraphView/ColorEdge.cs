@@ -10,36 +10,34 @@ public class ColoredEdge : Edge
     public float edgeThickness = 2f;
     public bool dashed = false;
 
-    private VisualElement overlay;
+    private VisualElement _overlay;
 
     public void ApplyOverlayVisual(GraphView graphView)
     {
-        if (overlay != null)
+        if (_overlay != null)
         {
-            overlay.RemoveFromHierarchy();
-            overlay = null;
+            _overlay.RemoveFromHierarchy();
+            _overlay = null;
         }
 
-        overlay = new VisualElement
+        _overlay = new VisualElement
         {
             pickingMode = PickingMode.Ignore,
             name = "edge-overlay"
         };
 
-        overlay.style.position = Position.Absolute;
-        overlay.style.backgroundColor = edgeColor;
-        overlay.style.height = edgeThickness;
-        overlay.style.transformOrigin = new StyleTransformOrigin(new TransformOrigin(0, 0));
-        overlay.style.borderTopLeftRadius = 2;
-        overlay.style.borderTopRightRadius = 2;
-        overlay.style.overflow = Overflow.Hidden;
-        overlay.style.height = edgeThickness + 1;
+        _overlay.style.position = Position.Absolute;
+        _overlay.style.backgroundColor = edgeColor;
+        _overlay.style.height = edgeThickness + 1;
+        _overlay.style.borderTopLeftRadius = 2;
+        _overlay.style.borderTopRightRadius = 2;
+        _overlay.style.overflow = Overflow.Hidden;
 
-        graphView.contentViewContainer.Add(overlay);
+        graphView.contentViewContainer.Add(_overlay);
 
         void RepositionOverlay()
         {
-            if (output == null || input == null || overlay == null)
+            if (output == null || input == null || _overlay == null)
                 return;
 
             // Get edge-aligned anchors, not center points
@@ -54,17 +52,17 @@ public class ColoredEdge : Edge
 
             if (dir.sqrMagnitude < 0.001f)
             {
-                overlay.visible = false;
+                _overlay.visible = false;
                 return;
             }
 
-            overlay.visible = true;
-            overlay.style.left = fromLocal.x;
-            overlay.style.top = fromLocal.y;
-            overlay.style.width = length;
+            _overlay.visible = true;
+            _overlay.style.left = fromLocal.x;
+            _overlay.style.top = fromLocal.y;
+            _overlay.style.width = length;
 
             float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
-            overlay.transform.rotation = Quaternion.Euler(0, 0, angle);
+            _overlay.transform.rotation = Quaternion.Euler(0, 0, angle);
         }
 
         graphView.schedule.Execute(RepositionOverlay).Every(16);

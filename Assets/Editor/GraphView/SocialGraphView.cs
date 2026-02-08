@@ -81,9 +81,12 @@ public class SocialGraphView : GraphView
             ? Color.Lerp(Color.gray, new Color(0f, 0.6f, 0f), friendliness) // greenish
             : Color.Lerp(Color.gray, new Color(0.6f, 0f, 0f), -friendliness); // reddish
 
-        edge.edgeControl.edgeWidth = (int)Mathf.Lerp(1f, 4f, Mathf.Abs(strength));
-        edge.edgeControl.inputColor = color;
-        edge.edgeControl.outputColor = color;
+        if (edge.edgeControl != null)
+        {
+            edge.edgeControl.edgeWidth = (int)Mathf.Lerp(1f, 4f, Mathf.Abs(strength));
+            edge.edgeControl.inputColor = color;
+            edge.edgeControl.outputColor = color;
+        }
     }
 
     public enum VillageConnectionType
@@ -302,7 +305,8 @@ public class SocialGraphView : GraphView
 
         // 2. Width from strength
         float baseWidth = Mathf.Lerp(1f, 5f, strength);
-        edge.edgeControl.edgeWidth = (int)baseWidth;
+        if (edge.edgeControl != null)
+            edge.edgeControl.edgeWidth = (int)baseWidth;
 
         // 3. Glow for very high stability
         if (strength > 0.95f && Magnitude(profile) > 6f)

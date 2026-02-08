@@ -65,7 +65,7 @@ public class CitizenNode : Node
         AddTextLine($"<b>Guild:</b> {citizen.guild}");
 
         main.Add(infoContainer);
-        mainContainer.Add(main);
+        titleContainer.Add(main);
 
         // Money bar
         moneyContainer = new VisualElement();
@@ -80,7 +80,7 @@ public class CitizenNode : Node
         var amount = new Label($"{citizen.money}");
         moneyContainer.Add(coin);
         moneyContainer.Add(amount);
-        mainContainer.Add(moneyContainer);
+        titleContainer.Add(moneyContainer);
 
         // Ethics panel (only visible if selected)
         ethicsPanel = new VisualElement();
@@ -104,14 +104,14 @@ public class CitizenNode : Node
             AddEthicsSlider("Respect", citizen.ethics.respect);
             AddEthicsSlider("Courage", citizen.ethics.courage);
             AddEthicsSlider("Temperance", citizen.ethics.temperance);
-            mainContainer.Add(ethicsPanelWrapper);
+            titleContainer.Add(ethicsPanelWrapper);
         }
 
         // Dynamic ports
         opinionPort = InstantiatePort(Orientation.Horizontal, Direction.Output, Port.Capacity.Multi, typeof(float));
         opinionPort.portName = "";
         opinionPort.style.position = Position.Absolute;
-        opinionPort.style.left = style.width.value.value * 0.5f - 8f;
+        opinionPort.style.left = new StyleLength(StyleKeyword.Auto);
         opinionPort.style.top = -10f;
         opinionPort.portColor = Color.red;
         Add(opinionPort);
@@ -120,8 +120,8 @@ public class CitizenNode : Node
         targetPort = InstantiatePort(Orientation.Horizontal, Direction.Input, Port.Capacity.Multi, typeof(float));
         targetPort.portName = "";
         targetPort.style.position = Position.Absolute;
-        targetPort.style.left = style.width.value.value * 0.5f - 8f;
-        targetPort.style.top = style.height.value.value - 10f;
+        targetPort.style.left = new StyleLength(StyleKeyword.Auto);
+        targetPort.style.top = new StyleLength(Length.Percent(100f));
         targetPort.portColor = Color.blue;
         Add(targetPort);
         inputContainer.Add(targetPort);
@@ -206,15 +206,15 @@ public class CitizenNode : Node
             AddEthicsSlider("Courage", mockData.ethics.courage);
             AddEthicsSlider("Temperance", mockData.ethics.temperance);
 
-            if (!mainContainer.Contains(ethicsPanelWrapper))
-                mainContainer.Add(ethicsPanelWrapper);
+            if (!titleContainer.Contains(ethicsPanelWrapper))
+                titleContainer.Add(ethicsPanelWrapper);
         }
         else
         {
             style.height = 180;
 
-            if (ethicsPanelWrapper != null && ethicsPanelWrapper.parent == mainContainer)
-                mainContainer.Remove(ethicsPanelWrapper);
+            if (ethicsPanelWrapper != null && ethicsPanelWrapper.parent == titleContainer)
+                titleContainer.Remove(ethicsPanelWrapper);
         }
     }
 }

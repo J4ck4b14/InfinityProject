@@ -1,5 +1,5 @@
-﻿using Unity.Entities;
-using Unity.Collections;
+﻿using Unity.Burst;
+using Unity.Entities;
 using Unity.Mathematics;
 
 /// <summary>
@@ -10,53 +10,65 @@ using Unity.Mathematics;
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 public partial class MemorySystem : SystemBase
 {
+    [BurstCompile]
+    partial struct MemoryDecayJob : IJobEntity
+    {
+        public float DeltaTime;
+
+        public void Execute(ref DynamicBuffer<MemoryEvent> memBuf, in Identity id)
+        {
+            if (memBuf.Length == 0)
+                return;
+
+            float fullness = memBuf.Length / (float)MemoryConfig.MaxEvents;
+
+            // Count trauma events
+            int traumaCount = 0;
+            for (int i = 0; i < memBuf.Length; i++)
+                if (memBuf[i].Magnitude >= 0.7f)
+                    traumaCount++;
+
+            float numBase = MemoryConfig.LambdaBase * (1f + id.Age * MemoryConfig.WeightAge + fullness * MemoryConfig.WeightFullness);
+            float traumaDenBase = 1f + traumaCount * MemoryConfig.WeightTrauma; // includes the leading1
+
+            // Decay and compact in one pass
+            int write = 0;
+            for (int i = 0; i < memBuf.Length; i++)
+            {
+                var ev = memBuf[i];
+                float den = traumaDenBase + ev.Magnitude * MemoryConfig.WeightMagnitude; //1 + mag*w_mag + traumaCount*w_trauma
+                float lambdaEvent = numBase / den;
+                ev.EmotionalWeight *= math.exp(-lambdaEvent * DeltaTime);
+
+                if (ev.EmotionalWeight >= 0.01f)
+                {
+                    memBuf[write++] = ev;
+                }
+            }
+
+            if (write < memBuf.Length)
+            {
+                memBuf.ResizeUninitialized(write);
+            }
+
+            // Enforce max capacity: remove oldest entries if necessary by shifting left
+            int excess = memBuf.Length - MemoryConfig.MaxEvents;
+            if (excess > 0)
+            {
+                int remaining = memBuf.Length - excess;
+                for (int k = 0; k < remaining; k++)
+                {
+                    memBuf[k] = memBuf[k + excess];
+                }
+                memBuf.ResizeUninitialized(remaining);
+            }
+        }
+    }
+
     protected override void OnUpdate()
     {
-        float deltaTime = SystemAPI.Time.DeltaTime;
-
-        Entities
-            .WithName("DecayAndPruneMemories")
-            .ForEach((ref DynamicBuffer<MemoryEvent> memBuf, in Identity id) =>
-            {
-                // Compute how full the buffer is [0–1]
-                float fullness = memBuf.Length / (float)MemoryConfig.MaxEvents;
-
-                // Count high‐magnitude “trauma” events
-                int traumaCount = 0;
-                for (int i = 0; i < memBuf.Length; i++)
-                    if (memBuf[i].Magnitude >= 0.7f)
-                        traumaCount++;
-
-                // Decay each event’s emotional weight
-                for (int i = memBuf.Length - 1; i >= 0; i--)
-                {
-                    var ev = memBuf[i];
-
-                    // λ_event = Λ_base * (1 + Age*w_age + Fullness*w_full)
-                    //                  / (1 + Magnitude*w_mag + TraumaCount*w_trauma)
-                    float num = MemoryConfig.LambdaBase
-                              * (1
-                                 + id.Age * MemoryConfig.WeightAge
-                                 + fullness * MemoryConfig.WeightFullness);
-                    float den = 1
-                              + ev.Magnitude * MemoryConfig.WeightMagnitude
-                              + traumaCount * MemoryConfig.WeightTrauma;
-                    float lambdaEvent = num / den;
-
-                    ev.EmotionalWeight *= math.exp(-lambdaEvent * deltaTime);
-                    memBuf[i] = ev;
-                }
-
-                // Remove entries with negligible weight
-                for (int i = memBuf.Length - 1; i >= 0; i--)
-                    if (memBuf[i].EmotionalWeight < 0.01f)
-                        memBuf.RemoveAt(i);
-
-                // Enforce max buffer capacity by removing oldest
-                while (memBuf.Length > MemoryConfig.MaxEvents)
-                    memBuf.RemoveAt(0);
-
-            })
-            .ScheduleParallel();
+        var job = new MemoryDecayJob { DeltaTime = SystemAPI.Time.DeltaTime };
+        var handle = job.ScheduleParallel(Dependency);
+        Dependency = handle;
     }
 }

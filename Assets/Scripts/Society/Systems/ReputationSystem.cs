@@ -1,78 +1,232 @@
-﻿using Unity.Entities;
+﻿using Unity.Burst;
 using Unity.Collections;
+using Unity.Entities;
 using Unity.Mathematics;
 
 /// <summary>
 /// Consumes one‐shot LocalReputationDelta components,
 /// propagates them fractally via SocialBridge buffers
-/// (using α for first hop, TODO: β for further hops),
+/// (using α for first hop, β for further hops),
 /// and applies per‐frame exponential decay (λ).
+/// Implements mouth-to-mouth multi-hop propagation with hop-limit and edge-cap.
 /// </summary>
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 public partial class ReputationSystem : SystemBase
 {
+    private EntityCommandBufferSystem _ecbSystem;
+
+    // Tunable limits to control cost of propagation
+    private const int MaxHops = 4; // include first-hop (1) .. MaxHops
+    private const int MaxProcessedEdges = 200000; // safety cap per frame
+
+    protected override void OnCreate()
+    {
+        base.OnCreate();
+        _ecbSystem = World.GetOrCreateSystemManaged<BeginSimulationEntityCommandBufferSystem>();
+    }
+
     protected override void OnUpdate()
     {
-        // 1) Cache Δt for decay calculations
         float deltaTime = SystemAPI.Time.DeltaTime;
+        var ecb = _ecbSystem.CreateCommandBuffer().AsParallelWriter();
 
-        // 2) Collect all LocalReputationDelta this frame
-        var localDeltas = new NativeList<LocalDelta>(Allocator.Temp);
-        Entities
+        // Collect deltas into a NativeList
+        var localDeltas = new NativeList<LocalDelta>(Allocator.TempJob);
+
+        var collectHandle = Entities
             .WithName("CollectLocalReputationDeltas")
             .ForEach((Entity e, in LocalReputationDelta lrd) =>
             {
                 localDeltas.Add(new LocalDelta { Source = e, Delta = lrd.DeltaR });
             })
-            .Run();
+            .ScheduleParallel(Dependency);
 
-        // 3) Remove each LocalReputationDelta so it fires only once
-        Entities
+        // Ensure collection completes before processing propagation
+        collectHandle.Complete();
+
+        // Clear LocalReputationDelta by removing the component via ECB in a job
+        var clearHandle = Entities
             .WithName("ClearLocalReputationDeltas")
-            .WithStructuralChanges()
-            .ForEach((Entity e) =>
+            .ForEach((Entity e, int entityInQueryIndex) =>
             {
-                EntityManager.RemoveComponent<LocalReputationDelta>(e);
+                ecb.RemoveComponent<LocalReputationDelta>(entityInQueryIndex, e);
             })
-            .Run();
+            .ScheduleParallel(Dependency);
 
-        // 4) First‐hop propagation into neighbors
+        _ecbSystem.AddJobHandleForProducer(clearHandle);
+        clearHandle.Complete();
+
+        // If no deltas, just run decay and exit
+        if (localDeltas.Length == 0)
+        {
+            localDeltas.Dispose();
+            // Decay pass
+            float decay = math.exp(-ReputationConfig.Lambda * deltaTime);
+            Entities
+                .WithName("DecayReputationScores")
+                .ForEach((ref DynamicBuffer<SocialBridge> buf) =>
+                {
+                    for (int i = 0; i < buf.Length; i++)
+                    {
+                        var b = buf[i];
+                        b.ReputationScore = MultiplyProfile(b.ReputationScore, decay);
+                        buf[i] = b;
+                    }
+                })
+                .ScheduleParallel();
+
+            return;
+        }
+
+        // Prepare frontier: start with the original sources as nodes carrying their DeltaR payload
+        var frontierMap = new NativeParallelHashMap<Entity, EthicalProfile>(localDeltas.Length * 2, Allocator.Temp);
+        var nextMap = new NativeParallelHashMap<Entity, EthicalProfile>(localDeltas.Length * 2, Allocator.Temp);
+        var visited = new NativeParallelHashMap<Entity, byte>(localDeltas.Length * 2, Allocator.Temp);
+
+        // Seed frontierMap with sources
         for (int i = 0; i < localDeltas.Length; i++)
         {
-            var source = localDeltas[i].Source;
-            var deltaProf = localDeltas[i].Delta;
-            float effectiveAlpha = ReputationConfig.Alpha; // Optionally multiply by magnitude
-
-            // Get all edges from this node
-            var bridges = EntityManager.GetBuffer<SocialBridge>(source);
-            for (int j = 0; j < bridges.Length; j++)
+            var s = localDeltas[i];
+            if (frontierMap.TryGetValue(s.Source, out var existing))
             {
-                var bridge = bridges[j];
-                // α × w_ij × ΔR
-                var weighted = MultiplyProfile(deltaProf, effectiveAlpha * bridge.RelationshipStrength);
-                bridge.ReputationScore = AddProfiles(bridge.ReputationScore, weighted);
-                bridges[j] = bridge;
-
-                // TODO: enqueue weighted*β into a queue for neighbor‐of‐neighbor hops
+                frontierMap[s.Source] = AddProfiles(existing, s.Delta);
+            }
+            else
+            {
+                frontierMap.TryAdd(s.Source, s.Delta);
             }
         }
 
-        // 5) Apply temporal decay to every reputation score
+        localDeltas.Dispose();
+
+        int edgesProcessed = 0;
+        float attenuation = ReputationConfig.Alpha; // alpha for first-hop
+
+        // BFS-style multi-hop propagation (synchronous), up to MaxHops
+        for (int hop = 1; hop <= MaxHops; hop++)
+        {
+            // Clear nextMap
+            nextMap.Clear();
+
+            // Iterate over current frontier entries
+            var keys = frontierMap.GetKeyArray(Allocator.Temp);
+            try
+            {
+                for (int ki = 0; ki < keys.Length; ki++)
+                {
+                    var node = keys[ki];
+
+                    // If this node has already been processed in an earlier hop, skip to avoid echoes
+                    if (visited.ContainsKey(node))
+                        continue;
+
+                    // Retrieve payload for this node
+                    if (!frontierMap.TryGetValue(node, out var payload))
+                        continue;
+
+                    // Mark node as visited (processed)
+                    visited.TryAdd(node, 1);
+
+                    // Read the node's SocialBridge buffer; if missing, nothing to broadcast
+                    if (!EntityManager.HasComponent<SocialBridge>(node))
+                        continue;
+
+                    var bridges = EntityManager.GetBuffer<SocialBridge>(node);
+
+                    for (int bi = 0; bi < bridges.Length; bi++)
+                    {
+                        if (edgesProcessed >= MaxProcessedEdges)
+                            break; // global cap
+
+                        var bridge = bridges[bi];
+
+                        // Weighted delta sent to this neighbor
+                        var weighted = MultiplyProfile(payload, attenuation * bridge.RelationshipStrength);
+
+                        // Update this node's bridge reputation score (node broadcasting about others)
+                        bridge.ReputationScore = AddProfiles(bridge.ReputationScore, weighted);
+                        bridges[bi] = bridge;
+
+                        // Accumulate for neighbor to propagate in next hop
+                        var neighbor = bridge.Other;
+                        if (visited.ContainsKey(neighbor))
+                        {
+                            // neighbor already processed earlier; skip adding
+                        }
+                        else
+                        {
+                            if (nextMap.TryGetValue(neighbor, out var accum))
+                            {
+                                nextMap[neighbor] = AddProfiles(accum, weighted);
+                            }
+                            else
+                            {
+                                nextMap.TryAdd(neighbor, weighted);
+                            }
+                        }
+
+                        edgesProcessed++;
+                    }
+
+                    if (edgesProcessed >= MaxProcessedEdges)
+                        break;
+                }
+            }
+            finally
+            {
+                keys.Dispose();
+            }
+
+            if (edgesProcessed >= MaxProcessedEdges)
+                break;
+
+            // Prepare for next hop: frontierMap = nextMap, attenuation *= Beta
+            frontierMap.Clear();
+
+            // Move entries from nextMap into frontierMap
+            var nextKeys = nextMap.GetKeyArray(Allocator.Temp);
+            try
+            {
+                for (int ni = 0; ni < nextKeys.Length; ni++)
+                {
+                    var k = nextKeys[ni];
+                    if (nextMap.TryGetValue(k, out var v))
+                    {
+                        frontierMap.TryAdd(k, v);
+                    }
+                }
+            }
+            finally
+            {
+                nextKeys.Dispose();
+            }
+
+            attenuation *= ReputationConfig.Beta;
+
+            // If frontier empty, stop
+            if (frontierMap.Count() == 0)
+                break;
+        }
+
+        // Dispose maps
+        frontierMap.Dispose();
+        nextMap.Dispose();
+        visited.Dispose();
+
+        // Apply temporal decay to every reputation score (jobified)
+        float decayVal = math.exp(-ReputationConfig.Lambda * deltaTime);
         Entities
             .WithName("DecayReputationScores")
             .ForEach((ref DynamicBuffer<SocialBridge> buf) =>
             {
-                float decay = math.exp(-ReputationConfig.Lambda * deltaTime);
                 for (int i = 0; i < buf.Length; i++)
                 {
                     var b = buf[i];
-                    b.ReputationScore = MultiplyProfile(b.ReputationScore, decay);
+                    b.ReputationScore = MultiplyProfile(b.ReputationScore, decayVal);
                     buf[i] = b;
                 }
             })
             .ScheduleParallel();
-
-        localDeltas.Dispose();
     }
 
     // Helper struct to batch deltas

@@ -200,18 +200,6 @@ public class SocialGraphWindow : EditorWindow
             villageDropdown.menu.AppendAction(name, _ => GenerateMockGraph(GraphMode.SingleVillage, name));
         }
 
-        // Add each village from the loaded mock data
-        if (mockData != null)
-        {
-            foreach (var village in mockData.villages)
-            {
-                string name = village.villageName;
-                villageDropdown.menu.AppendAction(name, _ => GenerateMockGraph(name));
-            }
-        }
-
-        toolbar.Add(villageDropdown);
-
         // Add a button to clear the graph
         var clearButton = new Button(() =>
         {

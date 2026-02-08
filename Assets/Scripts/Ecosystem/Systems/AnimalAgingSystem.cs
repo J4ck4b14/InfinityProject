@@ -1,9 +1,22 @@
-using Unity.Entities;
 using InfinityProject.Time;
+using Unity.Burst;
+using Unity.Entities;
 
 [UpdateInGroup(typeof(SimulationSystemGroup))]
 public partial class AnimalAgingSystem : SystemBase
 {
+    [BurstCompile]
+    partial struct AgingJob : IJobEntity
+    {
+        public float DeltaYears;
+
+        public void Execute(ref Lifespan life)
+        {
+            if (!life.IsLegendary)
+                life.Age += DeltaYears;
+        }
+    }
+
     protected override void OnUpdate()
     {
         // Fetch current scale
@@ -15,12 +28,8 @@ public partial class AnimalAgingSystem : SystemBase
         double dtYears = baseYearsPerSec * SystemAPI.Time.DeltaTime * scale;
         float fYears = (float)dtYears;
 
-        Entities
-            .ForEach((ref Lifespan life) =>
-            {
-                if (!life.IsLegendary)
-                    life.Age += fYears;
-            })
-            .Run();
+        var job = new AgingJob { DeltaYears = fYears };
+        var handle = job.ScheduleParallel(Dependency);
+        Dependency = handle;
     }
 }

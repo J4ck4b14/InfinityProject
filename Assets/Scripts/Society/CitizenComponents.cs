@@ -10,19 +10,19 @@ using Unity.Transforms;
 public static class ReputationConfig
 {
     /// <summary>
-    /// ?: base proportion of a node’s reputation delta transmitted to each direct neighbor.
+    /// alpha: base proportion of a node’s reputation delta transmitted to each direct neighbor.
     /// Scaled at runtime by event.Magnitude (e.g. effectiveAlpha = Alpha * Magnitude).
     /// </summary>
     public const float Alpha = 0.9f;
 
     /// <summary>
-    /// ?: base attenuation factor applied on each propagation hop beyond the first.
-    /// Scaled by event.Magnitude (e.g. effectiveBeta = Beta * Magnitude).
+    /// beta: base attenuation factor applied on each propagation hop beyond the first.
+    /// Scaled at runtime by event.Magnitude (e.g. effectiveBeta = Beta * Magnitude).
     /// </summary>
     public const float Beta = 0.5f;
 
     /// <summary>
-    /// ?: baseline temporal decay constant for reputational weight (per second).
+    /// lambda: baseline temporal decay constant for reputational weight (per second).
     /// Each frame, ReputationScore *= exp(-Lambda * ?t).
     /// </summary>
     public const float Lambda = 0.01f;
@@ -223,4 +223,40 @@ public struct LocalReputationDelta : IComponentData
     /// ActionSystem or PlayerActionSystem writes this component to the source entity; ReputationSystem will consume it and propagate fractally via SocialBridge buffers.
     /// </summary>
     public EthicalProfile DeltaR;
+}
+
+// -----------------------------------------------------------------------------
+// K) MEMORY EVENT BUFFER PRUNING AND DECAY
+// -----------------------------------------------------------------------------
+public struct DecayedMemBuffer : IComponentData
+{
+    public Entity TargetEntity; // Entity this buffer belongs to
+
+    public void PruneAndDecay(DynamicBuffer<MemoryEvent> memBuf)
+    {
+        // Decay and prune events in the buffer
+        int write = 0;
+        for (int i = 0; i < memBuf.Length; i++)
+        {
+            var ev = memBuf[i];
+            // compute decayed weight...
+            if (ev.EmotionalWeight >= 0.01f)
+            {
+                memBuf[write++] = ev;
+            }
+        }
+        if (write < memBuf.Length)
+        {
+            memBuf.ResizeUninitialized(write);
+        }
+        // enforce capacity
+        int excess = memBuf.Length - MemoryConfig.MaxEvents;
+        if (excess > 0)
+        {
+            // remove first 'excess' entries by shifting left or use RemoveRange if available
+            for (int k = 0; k < memBuf.Length - excess; k++)
+                memBuf[k] = memBuf[k + excess];
+            memBuf.ResizeUninitialized(memBuf.Length - excess);
+        }
+    }
 }
