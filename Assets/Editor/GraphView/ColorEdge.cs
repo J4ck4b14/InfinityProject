@@ -62,7 +62,7 @@ public class ColoredEdge : Edge
             _overlay.style.width = length;
 
             float angle = Mathf.Atan2(dir.y, dir.x) * Mathf.Rad2Deg;
-            _overlay.transform.rotation = Quaternion.Euler(0, 0, angle);
+            _overlay.style.rotate = Quaternion.Euler(0, 0, angle);
         }
 
         graphView.schedule.Execute(RepositionOverlay).Every(16);

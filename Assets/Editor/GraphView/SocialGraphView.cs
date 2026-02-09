@@ -14,7 +14,14 @@ public class SocialGraphView : GraphView
 {
     private CitizenNode selectedCitizen;
     private List<Edge> allEdges = new();
-    private CitizenInteractionController interactionController = new CitizenInteractionController();
+    private CitizenInteractionController interactionController = new();
+
+    // Small metadata holder for edges so we can read typed data later
+    private class EdgeMeta
+    {
+        public float Strength;
+        public MockEthicalProfile Profile;
+    }
 
     public SocialGraphView()
     {
@@ -40,6 +47,9 @@ public class SocialGraphView : GraphView
 
         // Visual styling
         style.flexGrow = 1.0f;
+
+        // Periodically refresh edge styles so UI reflects changes to reputation data
+        schedule.Execute(() => UpdateEdgeStyles()).Every(250);
     }
 
     /// <summary>
@@ -48,6 +58,7 @@ public class SocialGraphView : GraphView
     public void ClearGraph()
     {
         DeleteElements(graphElements);
+        allEdges.Clear();
     }
 
     /// <summary>
@@ -70,8 +81,8 @@ public class SocialGraphView : GraphView
         var edge = source.opinionPort.ConnectTo(target.targetPort);
         if (edge == null) return;
 
-        // Assign metadata
-        edge.userData = new { strength, profile };
+        // Assign typed metadata so we can read it later without reflection
+        edge.userData = new EdgeMeta { Strength = strength, Profile = profile };
         AddElement(edge);
         allEdges.Add(edge);
 
@@ -87,6 +98,10 @@ public class SocialGraphView : GraphView
             edge.edgeControl.inputColor = color;
             edge.edgeControl.outputColor = color;
         }
+
+        // Style immediately
+        if (edge.userData is EdgeMeta meta)
+            StyleEdgeByReputation(edge, meta.Strength, meta.Profile);
     }
 
     public enum VillageConnectionType
@@ -369,21 +384,25 @@ public class SocialGraphView : GraphView
             {
                 edge.AddToClassList("edge-dotted");
             }
+
+            // If edge carries metadata, apply reputation-based styling
+            if (edge.userData is EdgeMeta meta)
+            {
+                StyleEdgeByReputation(edge, meta.Strength, meta.Profile);
+            }
         }
     }
 
     public void SetSelectedCitizen(CitizenNode node)
     {
         // Deselect previous
-        if (selectedCitizen != null)
-            selectedCitizen.SetSelected(false);
+        selectedCitizen?.SetSelected(false);
 
         selectedCitizen = node;
         interactionController.SetInitiator(node);
 
         // Select new
-        if (selectedCitizen != null)
-            selectedCitizen.SetSelected(true);
+        selectedCitizen?.SetSelected(true);
 
         UpdateEdgeStyles();
     }

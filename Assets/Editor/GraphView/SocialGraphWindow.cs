@@ -5,6 +5,7 @@ using UnityEditor.Experimental.GraphView;
 using UnityEditor.UIElements;
 using UnityEngine;
 using UnityEngine.UIElements;
+using Unity.Entities;
 
 /// <summary>
 /// Custom Unity Editor tool for visualizing the social structure of villages and citizens.
@@ -75,6 +76,13 @@ public class SocialGraphWindow : EditorWindow
     /// </summary>
     private void GenerateMockGraph(GraphMode mode = GraphMode.Global, string villageFilter = null)
     {
+        // If playing, prefer live ECS data
+        if (Application.isPlaying && World.DefaultGameObjectInjectionWorld != null)
+        {
+            GenerateLiveGraph();
+            return;
+        }
+
         if (mockData == null) return;
 
         graphView.ClearGraph();
@@ -146,7 +154,7 @@ public class SocialGraphWindow : EditorWindow
         {
             int count = citizenNodes.Count;
             float radius = 300f;
-            Vector2 center = new Vector2(600f, 400f); // You can tweak this for visual balance
+            Vector2 center = new (600f, 400f); // You can tweak this for visual balance
 
             for (int i = 0; i < count; i++)
             {
@@ -157,6 +165,119 @@ public class SocialGraphWindow : EditorWindow
         }
     }
 
+    // Generate graph from live ECS world entities (play mode)
+    private void GenerateLiveGraph()
+    {
+        var world = World.DefaultGameObjectInjectionWorld;
+        if (world == null)
+        {
+            Debug.LogWarning("ECS World not available.");
+            return;
+        }
+
+        var em = world.EntityManager;
+        var query = em.CreateEntityQuery(ComponentType.ReadOnly<Identity>(), ComponentType.ReadOnly<SocialBridge>());
+        using (var entities = query.ToEntityArray(Unity.Collections.Allocator.Temp))
+        {
+            graphView.ClearGraph();
+
+            var guidMap = new Dictionary<Entity, string>();
+            var citizens = new Dictionary<string, MockCitizen>();
+
+            // First pass: create citizen objects
+            int idx = 0;
+            foreach (var ent in entities)
+            {
+                var id = em.GetComponentData<Identity>(ent);
+                string guid = ent.Index.ToString();
+                var mc = new MockCitizen
+                {
+                    guid = guid,
+                    name = $"E{ent.Index}",
+                    age = Mathf.Clamp((int)id.Age, 16, 90),
+                    socialRank = id.SocialRank,
+                    guild = "ECS",
+                    gender = "N/A",
+                    profession = "Sim",
+                    status = string.Empty,
+                    money = 0f,
+                    hunger = 0.5f,
+                    sleepiness = 0.5f,
+                    safety = 0.5f,
+                    socialContact = 0.5f,
+                    ethics = MockEthicalProfile.Neutral,
+                    portrait = null,
+                    editorPosition = new Vector2(200 + (idx % 10) * 60, 200 + (idx / 10) * 60),
+                    connections = new List<MockBridge>()
+                };
+
+                guidMap[ent] = guid;
+                citizens[guid] = mc;
+                idx++;
+            }
+
+            // Second pass: fill connections from SocialBridge buffers
+            foreach (var ent in entities)
+            {
+                var buf = em.GetBuffer<SocialBridge>(ent);
+                if (!guidMap.TryGetValue(ent, out var srcGuid)) continue;
+                var src = citizens[srcGuid];
+
+                for (int i = 0; i < buf.Length; i++)
+                {
+                    var b = buf[i];
+                    if (!guidMap.TryGetValue(b.Other, out var tgtGuid))
+                        continue; // skip neighbors outside query
+
+                    var mb = new MockBridge
+                    {
+                        targetGuid = tgtGuid,
+                        targetType = b.Type,
+                        relationshipStrength = b.RelationshipStrength,
+                        reputation = new MockEthicalProfile
+                        {
+                            lawfulness = b.ReputationScore.Lawfulness,
+                            justice = b.ReputationScore.Justice,
+                            care = b.ReputationScore.Care,
+                            beneficence = b.ReputationScore.Beneficence,
+                            honesty = b.ReputationScore.Honesty,
+                            loyalty = b.ReputationScore.Loyalty,
+                            autonomy = b.ReputationScore.Autonomy,
+                            respect = b.ReputationScore.Respect,
+                            courage = b.ReputationScore.Courage,
+                            temperance = b.ReputationScore.Temperance
+                        }
+                    };
+
+                    src.connections.Add(mb);
+                }
+            }
+
+            // Now create nodes and edges in the view
+            var nodeLookup = new Dictionary<string, CitizenNode>();
+            foreach (var kv in citizens)
+            {
+                var node = graphView.CreateCitizenNode(kv.Value, kv.Value.editorPosition);
+                if (node != null)
+                {
+                    nodeLookup[kv.Key] = node;
+                }
+            }
+
+            // Create edges
+            foreach (var kv in citizens)
+            {
+                if (!nodeLookup.TryGetValue(kv.Key, out var fromNode)) continue;
+                foreach (var conn in kv.Value.connections)
+                {
+                    if (nodeLookup.TryGetValue(conn.targetGuid, out var toNode))
+                    {
+                        graphView.ConnectCitizens(fromNode, toNode, conn.relationshipStrength, conn.reputation);
+                    }
+                }
+            }
+        }
+    }
 
     private void CreateToolbar()
     {
@@ -490,7 +611,7 @@ public class SocialGraphWindow : EditorWindow
             graphView.ConnectVillages(from, to, SocialGraphView.VillageConnectionType.Relationship, weight);
         }
 
-        Vector2 center = new Vector2(800, 400);
+        Vector2 center = new (800, 400);
         float radius = 350f;
         int count = villageNodes.Count;
         float angleStep = 2 * Mathf.PI / count;

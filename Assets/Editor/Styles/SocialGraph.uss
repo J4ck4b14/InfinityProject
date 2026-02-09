@@ -151,3 +151,16 @@
     50%  { stroke-opacity: 1.0; }
     100% { stroke-opacity: 0.5; }
 }
+
+/* ===============================
+   Edge overlay element (positioned by code, styled here)
+   - Use this class to control height, border-radius, shadows, etc.
+   =============================== */
+.edge-overlay {
+    position: absolute;
+    height: 4px; /* default thickness; code may override */
+    background-color: rgba(150, 150, 150, 0.9);
+    border-radius: 2px;
+    box-shadow: 0px 0px 6px rgba(0, 0, 0, 0.35);
+    transform-origin: left center;
+}
