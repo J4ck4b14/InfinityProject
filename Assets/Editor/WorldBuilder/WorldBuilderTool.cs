@@ -18,6 +18,12 @@ public class WorldBuilderTool : EditorWindow
     private FloraTab floraTab;
     private StructureTab structureTab;
 
+    // Horizontal UI scale for the tab content (replaces horizontal scrolling)
+    private float horizontalScale =1.0f;
+
+    // Vertical scroll position for the tab content
+    private Vector2 scrollPos = Vector2.zero;
+
     /// <summary>
     /// Opens the World Builder window via the Tools menu.
     /// </summary>
@@ -45,6 +51,21 @@ public class WorldBuilderTool : EditorWindow
     {
         DrawTabSelector();
 
+        // Horizontal scale control (acts like a "scale box" for content width)
+        GUILayout.Space(6);
+
+        // Apply horizontal scale to subsequent GUI drawing by modifying GUI.matrix.
+        // Scale around the left-top corner of the window.
+        var oldMatrix = GUI.matrix;
+        // Compute pivot in pixels (top-left of client area)
+        Vector2 pivot = new Vector2(0,0);
+        var scaleMatrix = Matrix4x4.TRS(new Vector3(pivot.x, pivot.y,0), Quaternion.identity, new Vector3(horizontalScale,1f,1f));
+        GUI.matrix = scaleMatrix * oldMatrix;
+
+        // Start vertical scroll area so content can scroll if taller than window
+        scrollPos = EditorGUILayout.BeginScrollView(scrollPos, GUILayout.ExpandHeight(true));
+
+        // Draw the active tab content (scaled horizontally)
         switch (currentTab)
         {
             case Tab.Map:
@@ -57,6 +78,11 @@ public class WorldBuilderTool : EditorWindow
                 structureTab?.Draw();
                 break;
         }
+
+        EditorGUILayout.EndScrollView();
+
+        // Restore GUI matrix so other editor UI is unaffected
+        GUI.matrix = oldMatrix;
     }
 
     /// <summary>

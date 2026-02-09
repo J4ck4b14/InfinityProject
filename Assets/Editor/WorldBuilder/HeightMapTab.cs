@@ -11,6 +11,19 @@ using System.Collections.Generic;
 /// Editor tab for multi‐tile, high‐performance procedural heightmap generation
 /// with geographic features, seamless tile stitching via neighbor lookup,
 /// and controllable ocean‐access edges.
+///
+/// Pipeline overview:
+/// - Noise (Burst): fills a flat height buffer (index = y * res + x) with [0..1] heights.
+/// - Main thread features: ridges, a simple river stamp, neighbor border stitching (Unity APIs).
+/// - Hydraulic erosion (Burst): mass-conserving4-neighbor water flux + sediment capacity model.
+/// - Thermal erosion (Burst): mass-conserving talus relaxation to reduce overly-steep slopes.
+/// - Ocean/beach (Burst): optional edge fade toward `waterLevel`.
+/// - Apply: convert to `float[,]` once and call `TerrainData.SetHeights`.
+///
+/// Notes on performance/realism:
+/// - Hydraulic water transport is mass-conserving (explicit flux buffers).
+/// - Sediment transport is approximated (no dedicated sediment flux buffers) to keep bandwidth low.
+/// - Neighbor stitching uses `Terrain.SampleHeight` (main thread) and can be a hotspot with many tiles.
 /// </summary>
 public class HeightMapTab
 {
@@ -50,12 +63,73 @@ public class HeightMapTab
     private bool useRidges = true;
     [Tooltip("Ridge strength multiplier")]
     private float ridgeStrength = 2f;
+
+    [Header("Hydraulic Erosion (Burst, Flux-based)")]
+    [Tooltip("Enable hydraulic erosion (wet planet)")]
+    private bool doHydraulicErode = true;
+    [Tooltip("Hydraulic iterations (100-250 typical at 1024)")]
+    private int hydraulicIterations = 160;
+    [Tooltip("Rain added per iteration (water units)")]
+    private float rainRate = 0.010f;
+    [Tooltip("Fraction of water removed per iteration")]
+    private float evaporation = 0.02f;
+    [Tooltip("Flow factor (higher moves water faster; too high can destabilize)")]
+    private float flowRate = 0.7f;
+    [Tooltip("Sediment capacity coefficient")]
+    private float sedimentCapacity = 4.0f;
+    [Tooltip("Erode speed")]
+    private float erodeSpeed = 0.35f;
+    [Tooltip("Deposit speed")]
+    private float depositSpeed = 0.35f;
+    [Tooltip("Minimum slope used for capacity")]
+    private float minSlope = 0.0005f;
+
+    /*
+     * Erosion parameter tuning cheatsheet (visual results depend on base noise scale + iterations):
+     *
+     * Hydraulic iterations:
+     * - More iterations => deeper, more connected channels, more time to transport sediment.
+     * - First knob to reduce if generation is too slow.
+     *
+     * Rain rate:
+     * - Higher => more widespread erosion and larger river basins.
+     * - Too high can wash out details unless evaporation also increases.
+     *
+     * Evaporation:
+     * - Higher => less standing water, shorter streams, less overall erosion.
+     * - Lower => water accumulates in basins; can create large carved drainage if iterations are high.
+     *
+     * Flow rate:
+     * - Higher => water moves faster and can carve sharper gullies.
+     * - Too high can introduce instability/over-erosion on steep terrain.
+     *
+     * Sediment capacity:
+     * - Higher => water can carry more material => more erosion and drifting sediment.
+     * - Lower => more deposition (alluvial fans/terraces) and gentler erosion.
+     *
+     * Erode vs deposit speed:
+     * - Higher erodeSpeed => digs channels faster.
+     * - Higher depositSpeed => fills valleys faster, smooths and builds up deltas.
+     * - Keeping them roughly balanced is a good default; bias depending on style.
+     *
+     * Min slope:
+     * - Prevents capacity from going to ~0 on flats.
+     * - Too high can cause erosion/deposition even on nearly-flat areas (muddy look).
+     *
+     * Thermal passes / talus angle:
+     * - Thermal is best as a finishing step: reduces spikes and overly-steep cliffs.
+     * - More passes or lower talus => more smoothing/relaxation.
+     */
+
+    [Header("Thermal Erosion (Burst)")]
     [Tooltip("Enable thermal erosion")]
     private bool doThermalErode = true;
-    [Tooltip("Erosion passes")]
+    [Tooltip("Thermal erosion passes")]
     private int erosionPasses = 20;
     [Tooltip("Talus slope threshold")]
     private float talusAngle = 0.02f;
+
+    [Header("Rivers")]
     [Tooltip("Minimum water level for rivers")]
     private float waterLevel = 0.3f;
 
@@ -65,10 +139,10 @@ public class HeightMapTab
     [SerializeField] private Terrain neighborW, neighborE;
     [SerializeField] private Terrain neighborSW, neighborS, neighborSE;
 
-    // Ocean / Beach Access
     [Tooltip("Which edges of this tile should gently slope into water")]
     [System.Flags]
     private enum OceanSides { None = 0, North = 1 << 0, South = 1 << 1, East = 1 << 2, West = 1 << 3, All = North | South | East | West }
+
     [Header("Ocean / Beach Access")]
     [Tooltip("Edges to carve toward water level")]
     private OceanSides oceanSides = OceanSides.None;
@@ -86,19 +160,68 @@ public class HeightMapTab
     #endregion
 
     // ─────────────────────────────────────────────────────────────────────────────
-    #region Native Buffers
+    #region Native Buffers / Job State
 
-    /// <summary>Flat [res×res] buffer of heights [0..1].</summary>
+    /// <summary>
+    /// Main height buffer for the tile.
+    /// Flat layout: index = y * res + x, values are normalized [0..1].
+    /// </summary>
     private NativeArray<float> _heights;
 
-    // Non-blocking job state
-    private JobHandle _heightJobHandle;
-    private bool _isJobScheduled = false;
-    private int _pendingRes = 0;
-    private bool _cancelRequested = false;
+    /// <summary>
+    /// Scratch buffer used for any step requiring double-buffering (write output separately).
+    /// Avoids race conditions and keeps jobs parallel-safe.
+    /// </summary>
+    private NativeArray<float> _scratch;
 
-    // Cancellation flag passed into the job (0 = run,1 = cancel)
+    // Hydraulic state (double-buffered so each iteration can be parallelized safely)
+    // - water: amount of water on each cell (arbitrary units)
+    // - sediment: transported material carried by the water (arbitrary units)
+    private NativeArray<float> _waterA, _waterB;
+    private NativeArray<float> _sedA, _sedB;
+
+    // Hydraulic outgoing water flux per cell toward each neighbor (E/W/N/S).
+    // Computed in one job (read-only inputs), applied in a second job (mass-conserving update).
+    private NativeArray<float> _fluxE, _fluxW, _fluxN, _fluxS;
+
+    // Thermal erosion outgoing "material flow" per cell (E/W/N/S). Same2-phase pattern as hydraulic.
+    private NativeArray<float> _outE, _outW, _outN, _outS;
+
+    /// <summary>
+    /// Handle representing the currently scheduled stage of the pipeline.
+    /// The editor polls this to keep the UI responsive.
+    /// </summary>
+    private JobHandle _pipelineHandle;
+
+    /// <summary>
+    /// True when the pipeline is active (jobs scheduled, editor polling enabled).
+    /// </summary>
+    private bool _isJobScheduled;
+
+    /// <summary>
+    /// Resolution for the currently running pipeline. Needed because we release control to editor update.
+    /// </summary>
+    private int _pendingRes;
+
+    /// <summary>
+    /// Cancellation requested from UI.
+    /// Jobs also check a shared native flag for early-out.
+    /// </summary>
+    private bool _cancelRequested;
+
+    /// <summary>
+    /// Cancellation flag passed into jobs:0 = run,1 = cancel.
+    /// Jobs check it and return early to reduce wasted work.
+    /// </summary>
     private NativeArray<int> _jobCancelFlag;
+
+    // Simple pipeline state machine.
+    private enum Phase { None, Noise, Hydraulic, Thermal, Ocean, Apply }
+    private Phase _phase = Phase.None;
+
+    // Iteration counters used for progress display.
+    private int _hydroIter;
+    private int _thermalIter;
 
     #endregion
 
@@ -115,32 +238,24 @@ public class HeightMapTab
     // ─────────────────────────────────────────────────────────────────────────────
     #region UI
 
-    // Auto-load favorites when the tab is created
-    public HeightMapTab()
-    {
-        LoadFavorites();
-    }
+    public HeightMapTab() => LoadFavorites();
 
     public void Draw()
     {
-        // Tile grid
         EditorGUILayout.LabelField("Tile Grid Settings", EditorStyles.boldLabel);
         tilesX = EditorGUILayout.IntField("Tiles X", tilesX);
         tilesY = EditorGUILayout.IntField("Tiles Y", tilesY);
         EditorGUILayout.BeginHorizontal();
-        tileX = EditorGUILayout.IntSlider("Tile X", tileX, 0, tilesX - 1);
-        tileY = EditorGUILayout.IntSlider("Tile Z", tileY, 0, tilesY - 1);
+        tileX = EditorGUILayout.IntSlider("Tile X", tileX, 0, Mathf.Max(0, tilesX - 1));
+        tileY = EditorGUILayout.IntSlider("Tile Z", tileY, 0, Mathf.Max(0, tilesY - 1));
         EditorGUILayout.EndHorizontal();
 
         EditorGUILayout.Space();
-        // Resolution & seed
         EditorGUILayout.LabelField("Heightmap Resolution & Seed", EditorStyles.boldLabel);
-        mapIndex = EditorGUILayout.Popup("Samples Per Side", mapIndex,
-                         System.Array.ConvertAll(mapSizes, s => s.ToString()));
+        mapIndex = EditorGUILayout.Popup("Samples Per Side", mapIndex, System.Array.ConvertAll(mapSizes, s => s.ToString()));
         globalSeed = EditorGUILayout.FloatField("Global Seed", globalSeed);
 
         EditorGUILayout.Space();
-        // Noise params
         EditorGUILayout.LabelField("Fractal Noise Parameters", EditorStyles.boldLabel);
         baseRoughness = EditorGUILayout.Slider("Base Roughness", baseRoughness, 0.1f, 5f);
         roughness = EditorGUILayout.Slider("Roughness", roughness, 1f, 10f);
@@ -148,21 +263,33 @@ public class HeightMapTab
         octaves = EditorGUILayout.IntSlider("Octaves", octaves, 1, 8);
 
         EditorGUILayout.Space();
-        // Features
         EditorGUILayout.LabelField("Geographic Features", EditorStyles.boldLabel);
+
         useRidges = EditorGUILayout.Toggle("Enable Ridges/Cliffs", useRidges);
         if (useRidges)
             ridgeStrength = EditorGUILayout.Slider("Ridge Strength", ridgeStrength, 1f, 5f);
 
+        doHydraulicErode = EditorGUILayout.Toggle("Enable Hydraulic Erosion (Wet)", doHydraulicErode);
+        if (doHydraulicErode)
+        {
+            hydraulicIterations = EditorGUILayout.IntSlider("Hydraulic Iterations", hydraulicIterations, 20, 400);
+            rainRate = EditorGUILayout.Slider("Rain Rate", rainRate, 0f, 0.05f);
+            evaporation = EditorGUILayout.Slider("Evaporation", evaporation, 0f, 0.1f);
+            flowRate = EditorGUILayout.Slider("Flow Rate", flowRate, 0.05f, 1.0f);
+            sedimentCapacity = EditorGUILayout.Slider("Sediment Capacity", sedimentCapacity, 0.1f, 12f);
+            erodeSpeed = EditorGUILayout.Slider("Erode Speed", erodeSpeed, 0f, 1f);
+            depositSpeed = EditorGUILayout.Slider("Deposit Speed", depositSpeed, 0f, 1f);
+            minSlope = EditorGUILayout.Slider("Min Slope", minSlope, 0f, 0.02f);
+        }
+
         doThermalErode = EditorGUILayout.Toggle("Enable Thermal Erosion", doThermalErode);
         if (doThermalErode)
         {
-            erosionPasses = EditorGUILayout.IntSlider("Erosion Passes", erosionPasses, 1, 100);
+            erosionPasses = EditorGUILayout.IntSlider("Thermal Passes", erosionPasses, 1, 120);
             talusAngle = EditorGUILayout.Slider("Talus Angle", talusAngle, 0.001f, 0.1f);
         }
 
         EditorGUILayout.Space();
-        // Neighbors
         EditorGUILayout.LabelField("Neighbor Terrains (Optional)", EditorStyles.boldLabel);
         neighborNW = (Terrain)EditorGUILayout.ObjectField("North-West", neighborNW, typeof(Terrain), true);
         neighborN = (Terrain)EditorGUILayout.ObjectField("North", neighborN, typeof(Terrain), true);
@@ -173,15 +300,16 @@ public class HeightMapTab
         neighborS = (Terrain)EditorGUILayout.ObjectField("South", neighborS, typeof(Terrain), true);
         neighborSE = (Terrain)EditorGUILayout.ObjectField("South-East", neighborSE, typeof(Terrain), true);
 
+        if (GUILayout.Button("Autofill From Selected Terrain"))
+            AutofillFromSelectedTerrain();
+
         EditorGUILayout.Space();
-        // Ocean access
         EditorGUILayout.LabelField("Ocean / Beach Access", EditorStyles.boldLabel);
         oceanSides = (OceanSides)EditorGUILayout.EnumFlagsField("Edges with Ocean", oceanSides);
         if (oceanSides != OceanSides.None)
             beachFadeDistance = EditorGUILayout.IntSlider("Beach Fade Distance", beachFadeDistance, 0, mapSizes[mapIndex] / 2);
 
         EditorGUILayout.Space();
-        // Terrain settings
         EditorGUILayout.LabelField("Terrain Settings", EditorStyles.boldLabel);
         terrainSide = EditorGUILayout.FloatField("Tile Size (X,Z)", terrainSide);
         terrainHeight = EditorGUILayout.FloatField("Max Height (Y)", terrainHeight);
@@ -189,87 +317,126 @@ public class HeightMapTab
 
         EditorGUILayout.Space();
         EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Button("Generate Tile (Fast + Features)"))
+
+        using (new EditorGUI.DisabledScope(_isJobScheduled))
         {
-            _cancelRequested = false;
-            GenerateTileFast();
+            if (GUILayout.Button("Generate Tile (Burst Erosion)"))
+            {
+                _cancelRequested = false;
+                GenerateTileFast();
+            }
         }
-        // Cancel button
-        if (GUILayout.Button("Cancel"))
+
+        using (new EditorGUI.DisabledScope(!_isJobScheduled))
         {
-            RequestCancel();
+            if (GUILayout.Button("Cancel"))
+                RequestCancel();
         }
+
         EditorGUILayout.EndHorizontal();
 
         EditorGUILayout.Space();
         DrawFavoritesUI();
     }
 
-    private void DrawFavoritesUI()
+    private void AutofillFromSelectedTerrain()
     {
-        EditorGUILayout.LabelField("Favorites (max5)", EditorStyles.boldLabel);
-        EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Button("Refresh"))
-            LoadFavorites();
-        if (GUILayout.Button("Save Current"))
-            PromptNameAndSaveFavorite();
-        EditorGUILayout.EndHorizontal();
-
-        // List favorites
-        for (int i = 0; i < MaxFavorites; i++)
+        var go = Selection.activeGameObject;
+        if (go == null)
         {
-            if (i < favorites.Count)
-            {
-                var fav = favorites[i];
-                EditorGUILayout.BeginHorizontal();
-                if (GUILayout.Button(fav.displayName, GUILayout.Width(200)))
-                {
-                    LoadFavoriteIntoTerrain(fav);
-                }
-                if (GUILayout.Button("Delete", GUILayout.Width(60)))
-                {
-                    DeleteFavorite(i);
-                }
-                EditorGUILayout.EndHorizontal();
-            }
-            else
-            {
-                EditorGUILayout.LabelField($"Slot {i + 1}: Empty");
-            }
+            EditorUtility.DisplayDialog("Autofill Failed", "No GameObject selected. Select a Terrain in the Hierarchy.", "OK");
+            return;
         }
+
+        var t = go.GetComponent<Terrain>();
+        if (t == null || t.terrainData == null)
+        {
+            EditorUtility.DisplayDialog("Autofill Failed", "Selected GameObject is not a Terrain with TerrainData.", "OK");
+            return;
+        }
+
+        targetTerrain = t;
+        terrainSide = t.terrainData.size.x;
+        terrainHeight = t.terrainData.size.y;
+
+        float sizeX = t.terrainData.size.x;
+        float sizeZ = t.terrainData.size.z;
+        Vector3 origin = t.transform.position;
+
+        neighborN = FindNeighborAtOffset(origin, 0, 1, sizeX, sizeZ);
+        neighborS = FindNeighborAtOffset(origin, 0, -1, sizeX, sizeZ);
+        neighborE = FindNeighborAtOffset(origin, 1, 0, sizeX, sizeZ);
+        neighborW = FindNeighborAtOffset(origin, -1, 0, sizeX, sizeZ);
+        neighborNE = FindNeighborAtOffset(origin, 1, 1, sizeX, sizeZ);
+        neighborNW = FindNeighborAtOffset(origin, -1, 1, sizeX, sizeZ);
+        neighborSE = FindNeighborAtOffset(origin, 1, -1, sizeX, sizeZ);
+        neighborSW = FindNeighborAtOffset(origin, -1, -1, sizeX, sizeZ);
+
+        EditorUtility.SetDirty((Object)targetTerrain);
+        SceneView.RepaintAll();
+    }
+
+    private Terrain FindNeighborAtOffset(Vector3 origin, int dx, int dz, float sizeX, float sizeZ)
+    {
+        Vector3 expected = origin + new Vector3(dx * sizeX, 0f, dz * sizeZ);
+        foreach (var t in Terrain.activeTerrains)
+        {
+            if (Vector3.Distance(t.transform.position, expected) < 1e-2f)
+                return t;
+        }
+        return null;
     }
 
     #endregion
 
     // ─────────────────────────────────────────────────────────────────────────────
-    #region Generation Workflow
+    #region Generation Pipeline
 
+    /// <summary>
+    /// Starts generation: allocates/reuses buffers, clears hydraulic state, and schedules the initial noise job.
+    /// Subsequent steps are scheduled by <see cref="PollPipeline"/>.
+    /// </summary>
     private void GenerateTileFast()
     {
-        // 1) Ensure a target Terrain exists (or create one)
         if (targetTerrain == null)
         {
-            if (EditorUtility.DisplayDialog("No Terrain Selected",
-                                            "Create a new Terrain GameObject?",
-                                            "Yes", "Cancel"))
+            if (EditorUtility.DisplayDialog("No Terrain Selected", "Create a new Terrain GameObject?", "Yes", "Cancel"))
                 CreateNewTerrain();
             else
                 return;
         }
 
-        // 2) Setup resolution & allocate buffer
         int res = mapSizes[mapIndex];
         int total = res * res;
-        if (_heights.IsCreated) _heights.Dispose();
-        _heights = new NativeArray<float>(total, Allocator.Persistent);
 
-        // prepare cancel flag
-        if (_jobCancelFlag.IsCreated) _jobCancelFlag.Dispose();
-        _jobCancelFlag = new NativeArray<int>(1, Allocator.Persistent);
+        EnsureNative(ref _heights, total);
+        EnsureNative(ref _scratch, total);
+
+        EnsureNative(ref _waterA, total);
+        EnsureNative(ref _waterB, total);
+        EnsureNative(ref _sedA, total);
+        EnsureNative(ref _sedB, total);
+
+        EnsureNative(ref _fluxE, total);
+        EnsureNative(ref _fluxW, total);
+        EnsureNative(ref _fluxN, total);
+        EnsureNative(ref _fluxS, total);
+
+        EnsureNative(ref _outE, total);
+        EnsureNative(ref _outW, total);
+        EnsureNative(ref _outN, total);
+        EnsureNative(ref _outS, total);
+
+        EnsureCancelFlag();
         _jobCancelFlag[0] = 0;
 
-        // 3) Fractal noise (Burst job) - schedule non-blocking
-        var job = new HeightmapJob
+        // Clear hydraulic state
+        _pipelineHandle = new ClearJob { data = _waterA, cancelFlag = _jobCancelFlag }.Schedule(total,256);
+        _pipelineHandle = new ClearJob { data = _waterB, cancelFlag = _jobCancelFlag }.Schedule(total,256, _pipelineHandle);
+        _pipelineHandle = new ClearJob { data = _sedA, cancelFlag = _jobCancelFlag }.Schedule(total,256, _pipelineHandle);
+        _pipelineHandle = new ClearJob { data = _sedB, cancelFlag = _jobCancelFlag }.Schedule(total,256, _pipelineHandle);
+
+        var noise = new HeightmapJob
         {
             width = res,
             height = res,
@@ -277,96 +444,317 @@ public class HeightMapTab
             roughness = roughness,
             persistence = persistence,
             octaves = octaves,
-            offset = new float2(globalSeed + tileX * res,
-                                  globalSeed + tileY * res),
+            offset = new float2(globalSeed + tileX * res, globalSeed + tileY * res),
             heights = _heights,
             cancelFlag = _jobCancelFlag
         };
 
-        _heightJobHandle = job.Schedule(total, 64);
+        // Base noise is the first heavy stage. It runs in Burst and fills `_heights`.
+        _pipelineHandle = noise.Schedule(total,64, _pipelineHandle);
+
+        // We don't block here; we poll completion in EditorApplication.update.
+        _phase = Phase.Noise;
         _isJobScheduled = true;
         _pendingRes = res;
         _cancelRequested = false;
 
-        // Start polling in editor update
-        EditorApplication.update -= PollHeightmapJob;
-        EditorApplication.update += PollHeightmapJob;
+        _hydroIter =0;
+        _thermalIter =0;
+
+        EditorApplication.update -= PollPipeline;
+        EditorApplication.update += PollPipeline;
     }
 
+    /// <summary>
+    /// Signals cancellation. Burst jobs will observe <see cref="_jobCancelFlag"/> and return early.
+    /// </summary>
     private void RequestCancel()
     {
         _cancelRequested = true;
-        // signal job to cancel as early as possible
         if (_jobCancelFlag.IsCreated)
             _jobCancelFlag[0] = 1;
     }
 
-    private void PollHeightmapJob()
+    /// <summary>
+    /// Editor update callback.
+    /// Keeps the editor responsive by:
+    /// - returning while jobs are running
+    /// - completing jobs only when done
+    /// - scheduling the next pipeline stage based on <see cref="_phase"/>
+    ///
+    /// Note: some steps must run on the main thread because they touch Unity APIs:
+    /// - river carving uses UnityEngine.Random
+    /// - neighbor stitching uses Terrain.SampleHeight
+    /// </summary>
+    private void PollPipeline()
     {
         if (!_isJobScheduled) return;
 
         if (_cancelRequested)
         {
-            // Try to complete quickly then cleanup
-            _heightJobHandle.Complete();
-            if (_heights.IsCreated) _heights.Dispose();
-            if (_jobCancelFlag.IsCreated) _jobCancelFlag.Dispose();
-            _isJobScheduled = false;
-            _pendingRes = 0;
-            EditorApplication.update -= PollHeightmapJob;
-            EditorUtility.ClearProgressBar();
-            Debug.Log("Heightmap generation cancelled.");
+            _pipelineHandle.Complete();
+            FinishPipeline("Heightmap generation cancelled.");
             return;
         }
 
-        // Show a waiting progress while job runs
-        if (!_heightJobHandle.IsCompleted)
+        if (!_pipelineHandle.IsCompleted)
         {
-            EditorUtility.DisplayProgressBar("Generating Heightmap", "Computing noise (Burst)...", 0.1f);
+            DrawPipelineProgress();
             return;
         }
 
-        // Complete the job and proceed with feature steps
-        _heightJobHandle.Complete();
+        _pipelineHandle.Complete();
 
         int res = _pendingRes;
+        int total = res * res;
 
-        // 4) Ridges, erosion, river carve with progress updates
-        EditorUtility.DisplayProgressBar("Generating Heightmap", "Applying ridges...", 0.3f);
-        if (useRidges) ApplyRidgeNoise(res, _heights, ridgeStrength);
-
-        if (doThermalErode)
+        switch (_phase)
         {
-            // ThermalErode will update progress during passes
-            ThermalErode(res, _heights, erosionPasses, talusAngle);
+            case Phase.Noise:
+            {
+                // CPU light operations
+                EditorUtility.DisplayProgressBar("Generating Heightmap", "Applying ridges...", 0.2f);
+                if (useRidges) ApplyRidgeNoise(_heights, ridgeStrength);
+
+                EditorUtility.DisplayProgressBar("Generating Heightmap", "Carving rivers...", 0.28f);
+                CarveRiver(res, _heights);
+
+                EditorUtility.DisplayProgressBar("Generating Heightmap", "Blending with neighbors...", 0.35f);
+                BlendWithNeighbors(res, _heights);
+
+                if (doHydraulicErode && hydraulicIterations > 0)
+                {
+                    ScheduleHydraulicIteration(res, total);
+                    return;
+                }
+
+                if (doThermalErode && erosionPasses > 0)
+                {
+                    ScheduleThermalPass(res, total);
+                    return;
+                }
+
+                ScheduleOceanOrApply(res, total);
+                return;
+            }
+
+            case Phase.Hydraulic:
+            {
+                _hydroIter++;
+                if (_hydroIter < hydraulicIterations)
+                {
+                    ScheduleHydraulicIteration(res, total);
+                    return;
+                }
+
+                if (doThermalErode && erosionPasses > 0)
+                {
+                    ScheduleThermalPass(res, total);
+                    return;
+                }
+
+                ScheduleOceanOrApply(res, total);
+                return;
+            }
+
+            case Phase.Thermal:
+            {
+                _thermalIter++;
+                if (_thermalIter < erosionPasses)
+                {
+                    ScheduleThermalPass(res, total);
+                    return;
+                }
+
+                ScheduleOceanOrApply(res, total);
+                return;
+            }
+
+            case Phase.Ocean:
+            {
+                ApplyAndFinish(res);
+                return;
+            }
+        }
+    }
+
+    private void DrawPipelineProgress()
+    {
+        float p = 0.1f;
+        string msg = "Working...";
+
+        switch (_phase)
+        {
+            case Phase.Noise:
+                p = 0.1f;
+                msg = "Computing noise (Burst)...";
+                break;
+
+            case Phase.Hydraulic:
+                p = 0.40f + 0.40f * (_hydroIter / Mathf.Max(1f, hydraulicIterations));
+                msg = $"Hydraulic erosion (Burst flux) {_hydroIter + 1}/{Mathf.Max(1, hydraulicIterations)}...";
+                break;
+
+            case Phase.Thermal:
+                p = 0.82f + 0.10f * (_thermalIter / Mathf.Max(1f, erosionPasses));
+                msg = $"Thermal erosion (Burst) {_thermalIter + 1}/{Mathf.Max(1, erosionPasses)}...";
+                break;
+
+            case Phase.Ocean:
+                p = 0.95f;
+                msg = "Ocean/beach carving (Burst)...";
+                break;
         }
 
-        EditorUtility.DisplayProgressBar("Generating Heightmap", "Carving rivers...", 0.75f);
-        CarveRiver(res, _heights);
+        EditorUtility.DisplayProgressBar("Generating Heightmap", msg, p);
+    }
 
-        // 5) Stitch neighbors for seamless borders
-        EditorUtility.DisplayProgressBar("Generating Heightmap", "Blending with neighbors...", 0.8f);
-        BlendWithNeighbors(res, _heights);
+    /// <summary>
+    /// Schedules one hydraulic erosion iteration:
+    ///1) Rain+evap modifies water.
+    ///2) Compute outgoing water fluxes.
+    ///3) Apply fluxes (mass-conserving) and do capacity-based erosion/deposition.
+    /// After scheduling, buffers are swapped (double-buffering).
+    /// </summary>
+    private void ScheduleHydraulicIteration(int res, int total)
+    {
+        // Rain + evaporation
+        var rain = new RainEvapJob
+        {
+            rainRate = rainRate,
+            evaporation = evaporation,
+            water = _waterA,
+            cancelFlag = _jobCancelFlag
+        }.Schedule(total, 256);
 
-        // 6) Ocean/beach access carving (if any)
-        if (oceanSides != OceanSides.None)
-            ApplyOceanAccess(res, _heights, waterLevel, oceanSides, beachFadeDistance);
+        // Compute outgoing fluxes (mass conserving)
+        var flux = new ComputeFluxJob
+        {
+            res = res,
+            flowRate = flowRate,
+            heights = _heights,
+            water = _waterA,
+            fluxE = _fluxE,
+            fluxW = _fluxW,
+            fluxN = _fluxN,
+            fluxS = _fluxS,
+            cancelFlag = _jobCancelFlag
+        }.Schedule(total, 128, rain);
 
-        // 7) Write into TerrainData (and pad +1 for Unity)
-        EditorUtility.DisplayProgressBar("Generating Heightmap", "Applying to Terrain...", 0.95f);
-        ApplyBufferToTerrain(_heights, res);
+        // Apply fluxes to update water + perform erosion/deposition into scratch buffers
+        var apply = new ApplyFluxAndErodeJob
+        {
+            res = res,
+            minSlope = minSlope,
+            capacityK = sedimentCapacity,
+            erodeSpeed = erodeSpeed,
+            depositSpeed = depositSpeed,
 
-        // 8) Cleanup
-        if (_heights.IsCreated)
-            _heights.Dispose();
-        if (_jobCancelFlag.IsCreated)
-            _jobCancelFlag.Dispose();
+            heightsIn = _heights,
+            heightsOut = _scratch,
 
+            waterIn = _waterA,
+            waterOut = _waterB,
+
+            sedimentIn = _sedA,
+            sedimentOut = _sedB,
+
+            fluxE = _fluxE,
+            fluxW = _fluxW,
+            fluxN = _fluxN,
+            fluxS = _fluxS,
+
+            cancelFlag = _jobCancelFlag
+        }.Schedule(total, 128, flux);
+
+        _pipelineHandle = apply;
+        _phase = Phase.Hydraulic;
+
+        Swap(ref _heights, ref _scratch);
+        Swap(ref _waterA, ref _waterB);
+        Swap(ref _sedA, ref _sedB);
+    }
+
+    /// <summary>
+    /// Schedules one thermal erosion pass (talus relaxation):
+    /// - outflow stage computes how much material leaves toward lower neighbors
+    /// - apply stage conserves material via inSum/outSum update
+    /// </summary>
+    private void ScheduleThermalPass(int res, int total)
+    {
+        var outflow = new ThermalOutflowJob
+        {
+            res = res,
+            talus = talusAngle,
+            heights = _heights,
+            outE = _outE,
+            outW = _outW,
+            outN = _outN,
+            outS = _outS,
+            cancelFlag = _jobCancelFlag
+        }.Schedule(total, 128);
+
+        var apply = new ThermalApplyJob
+        {
+            res = res,
+            heightsIn = _heights,
+            heightsOut = _scratch,
+            outE = _outE,
+            outW = _outW,
+            outN = _outN,
+            outS = _outS,
+            cancelFlag = _jobCancelFlag
+        }.Schedule(total, 128, outflow);
+
+        _pipelineHandle = apply;
+        _phase = Phase.Thermal;
+
+        Swap(ref _heights, ref _scratch);
+    }
+
+    private void ScheduleOceanOrApply(int res, int total)
+    {
+        if (oceanSides == OceanSides.None || beachFadeDistance <= 0)
+        {
+            ApplyAndFinish(res);
+            return;
+        }
+
+        var ocean = new OceanAccessJob
+        {
+            res = res,
+            waterH = waterLevel,
+            sidesMask = (int)oceanSides,
+            fadeDist = beachFadeDistance,
+            heights = _heights,
+            cancelFlag = _jobCancelFlag
+        };
+
+        _pipelineHandle = ocean.Schedule(total, 256);
+        _phase = Phase.Ocean;
+    }
+
+    private void ApplyAndFinish(int res)
+    {
+        EditorUtility.DisplayProgressBar("Generating Heightmap", "Applying to Terrain...", 0.99f);
+        ApplyBufferToTerrainFlat(_heights, res);
+        FinishPipeline(null);
+    }
+
+    private void FinishPipeline(string logMessage)
+    {
         _isJobScheduled = false;
         _pendingRes = 0;
+        _phase = Phase.None;
 
-        EditorApplication.update -= PollHeightmapJob;
+        EditorApplication.update -= PollPipeline;
         EditorUtility.ClearProgressBar();
+
+        if (_jobCancelFlag.IsCreated)
+            _jobCancelFlag[0] = 0;
+
+        if (!string.IsNullOrEmpty(logMessage))
+            Debug.Log(logMessage);
 
         SceneView.RepaintAll();
     }
@@ -382,26 +770,36 @@ public class HeightMapTab
         Undo.RegisterCreatedObjectUndo(go, "Create Terrain Tile");
     }
 
+    #endregion
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    #region Apply to Terrain (convert once)
+
     /// <summary>
-    /// Copies buffer→heightmap + pads last row/column for seamless stitching.
+    /// Applies the height buffer to the target terrain.
+    /// Unity requires a (res+1)x(res+1) height array. We pad the last row/column
+    /// by repeating the border values.
     /// </summary>
-    private void ApplyBufferToTerrain(NativeArray<float> buf, int res)
+    private void ApplyBufferToTerrainFlat(NativeArray<float> buf, int res)
     {
         Undo.RecordObject(targetTerrain.terrainData, "Apply Heights");
         var td = targetTerrain.terrainData;
+
         int hmRes = res + 1;
         td.heightmapResolution = hmRes;
         td.size = new Vector3(terrainSide, terrainHeight, terrainSide);
 
         var arr = new float[hmRes, hmRes];
-        // core
+
         for (int y = 0; y < res; y++)
+        {
+            int row = y * res;
             for (int x = 0; x < res; x++)
-                arr[y, x] = buf[y * res + x];
-        // pad right column
-        for (int y = 0; y < res; y++)
+                arr[y, x] = buf[row + x];
+
             arr[y, res] = arr[y, res - 1];
-        // pad top row
+        }
+
         for (int x = 0; x < hmRes; x++)
             arr[res, x] = arr[res - 1, x];
 
@@ -412,122 +810,59 @@ public class HeightMapTab
     #endregion
 
     // ─────────────────────────────────────────────────────────────────────────────
-    #region Seamless Neighbor Blending
+    #region Neighbor Blending (unchanged)
 
     /// <summary>
-    /// If any neighbor is assigned, copy its adjacent border heights
-    /// into our buffer so shared edges match perfectly. Uses sampling of neighbor
-    /// terrains in normalized coordinates so differing heightmap resolutions are handled.
+    /// Copies border heights from already-placed neighbor terrains so edges match seamlessly.
+    /// This uses Terrain.SampleHeight (Unity API) to handle differing heightmap resolutions,
+    /// but it must run on the main thread and can be a performance hotspot.
     /// </summary>
     private void BlendWithNeighbors(int res, NativeArray<float> buf)
     {
-        // Helper to convert interpolated neighbor world height to normalized neighbor height
         float SampleNeighborNormalizedHeight(Terrain neigh, float u, float v)
         {
             if (neigh == null) return 0f;
-            // World position on neighbor terrain at normalized coords
             var nd = neigh.terrainData;
             Vector3 worldPos = neigh.transform.position + new Vector3(u * nd.size.x, 0f, v * nd.size.z);
             float worldH = neigh.SampleHeight(worldPos);
-            // Convert to normalized [0..1] relative to neighbor terrain height
             float normalized = nd.size.y > 0f ? worldH / nd.size.y : 0f;
             return Mathf.Clamp01(normalized);
         }
 
-        // 1) North neighbor → copy its south edge (v =0)
         if (neighborN != null)
-        {
             for (int x = 0; x < res; x++)
-            {
-                float u = (res == 1) ? 0f : (float)x / (res - 1);
-                buf[(res - 1) * res + x] = SampleNeighborNormalizedHeight(neighborN, u, 0f);
-            }
-        }
+                buf[(res - 1) * res + x] = SampleNeighborNormalizedHeight(neighborN, (res == 1) ? 0f : (float)x / (res - 1), 0f);
 
-        // 2) South neighbor → copy its north edge (v =1)
         if (neighborS != null)
-        {
             for (int x = 0; x < res; x++)
-            {
-                float u = (res == 1) ? 0f : (float)x / (res - 1);
-                buf[0 * res + x] = SampleNeighborNormalizedHeight(neighborS, u, 1f);
-            }
-        }
+                buf[x] = SampleNeighborNormalizedHeight(neighborS, (res == 1) ? 0f : (float)x / (res - 1), 1f);
 
-        // 3) East neighbor → copy its west edge (u =0)
         if (neighborE != null)
-        {
             for (int y = 0; y < res; y++)
-            {
-                float v = (res == 1) ? 0f : (float)y / (res - 1);
-                buf[y * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborE, 0f, v);
-            }
-        }
+                buf[y * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborE, 0f, (res == 1) ? 0f : (float)y / (res - 1));
 
-        // 4) West neighbor → copy its east edge (u =1)
         if (neighborW != null)
-        {
             for (int y = 0; y < res; y++)
-            {
-                float v = (res == 1) ? 0f : (float)y / (res - 1);
-                buf[y * res + 0] = SampleNeighborNormalizedHeight(neighborW, 1f, v);
-            }
-        }
+                buf[y * res] = SampleNeighborNormalizedHeight(neighborW, 1f, (res == 1) ? 0f : (float)y / (res - 1));
 
-        // 5) Four corners (optional exact match) - sample neighbor corner positions
-        if (neighborNE != null)
-            buf[(res - 1) * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborNE, 0f, 0f);
-        if (neighborNW != null)
-            buf[(res - 1) * res + 0] = SampleNeighborNormalizedHeight(neighborNW, 1f, 0f);
-        if (neighborSE != null)
-            buf[0 * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborSE, 0f, 1f);
-        if (neighborSW != null)
-            buf[0 * res + 0] = SampleNeighborNormalizedHeight(neighborSW, 1f, 1f);
+        if (neighborNE != null) buf[(res - 1) * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborNE, 0f, 0f);
+        if (neighborNW != null) buf[(res - 1) * res + 0] = SampleNeighborNormalizedHeight(neighborNW, 1f, 0f);
+        if (neighborSE != null) buf[(res - 1)] = SampleNeighborNormalizedHeight(neighborSE, 0f, 1f);
+        if (neighborSW != null) buf[0] = SampleNeighborNormalizedHeight(neighborSW, 1f, 1f);
     }
 
     #endregion
 
     // ─────────────────────────────────────────────────────────────────────────────
-    #region Geographic Features
+    #region CPU Light Features
 
-    private void ApplyRidgeNoise(int res, NativeArray<float> buf, float strength)
+    private void ApplyRidgeNoise(NativeArray<float> buf, float strength)
     {
         for (int i = 0; i < buf.Length; i++)
         {
             float v = buf[i];
             buf[i] = math.abs(1f - 2f * v) * v * strength;
         }
-    }
-
-    private void ThermalErode(int res, NativeArray<float> buf, int passes, float talus)
-    {
-        for (int p = 0; p < passes; p++)
-        {
-            // update progress for erosion
-            if (passes > 0)
-                EditorUtility.DisplayProgressBar("Generating Heightmap", $"Thermal erosion pass {p + 1}/{passes}", 0.3f + 0.4f * ((float)p / passes));
-
-            for (int y = 1; y < res - 1; y++)
-                for (int x = 1; x < res - 1; x++)
-                {
-                    int idx = y * res + x;
-                    float h = buf[idx];
-                    foreach (var off in new int2[] { new(1, 0), new(-1, 0), new(0, 1), new(0, -1) })
-                    {
-                        int ni = (y + off.y) * res + (x + off.x);
-                        float dh = h - buf[ni];
-                        if (dh > talus)
-                        {
-                            float m = (dh - talus) * 0.5f;
-                            buf[idx] -= m;
-                            buf[ni] += m;
-                        }
-                    }
-                }
-        }
-
-        // Clear progress from erosion step
-        EditorUtility.ClearProgressBar();
     }
 
     private void CarveRiver(int res, NativeArray<float> buf)
@@ -537,95 +872,492 @@ public class HeightMapTab
         {
             int idx = y * res + x;
             buf[idx] = waterLevel;
+
             float best = buf[idx];
             int2 dir = int2.zero;
-            foreach (var off in new int2[] { new(1, 0), new(-1, 0), new(0, 1), new(0, -1) })
-            {
-                int nx = math.clamp(x + off.x, 0, res - 1);
-                int ny = math.clamp(y + off.y, 0, res - 1);
-                float v = buf[ny * res + nx];
-                if (v < best) { best = v; dir = off; }
-            }
+
+            Consider(1, 0);
+            Consider(-1, 0);
+            Consider(0, 1);
+            Consider(0, -1);
+
             x += dir.x; y += dir.y;
+
+            void Consider(int dx, int dy)
+            {
+                int nx = math.clamp(x + dx, 0, res - 1);
+                int ny = math.clamp(y + dy, 0, res - 1);
+                float v = buf[ny * res + nx];
+                if (v < best) { best = v; dir = new int2(dx, dy); }
+            }
         }
     }
 
     #endregion
 
     // ─────────────────────────────────────────────────────────────────────────────
-    #region Ocean / Beach Access
-
-    private void ApplyOceanAccess(int res, NativeArray<float> buf,
-                                 float waterH, OceanSides sides, int fadeDist)
-    {
-        // (Implementation unchanged from last iteration...)
-        // … carve each flagged edge down toward waterH, then fade inland over fadeDist …
-    }
-
-    #endregion
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    #region Burst Noise Job
+    #region Burst Jobs (Hydraulic Flux + Thermal + Ocean)
 
     [BurstCompile]
-    struct HeightmapJob : IJobParallelFor
+    private struct ClearJob : IJobParallelFor
+    {
+        public NativeArray<float> data;
+        [ReadOnly] public NativeArray<int> cancelFlag;
+
+        public void Execute(int index)
+        {
+            // cooperative cancellation
+            if (cancelFlag.IsCreated && cancelFlag[0] !=0) return;
+            data[index] =0f;
+        }
+    }
+
+    [BurstCompile]
+    private struct RainEvapJob : IJobParallelFor
+    {
+        public float rainRate;
+        public float evaporation;
+        public NativeArray<float> water;
+        [ReadOnly] public NativeArray<int> cancelFlag;
+
+        public void Execute(int index)
+        {
+            if (cancelFlag.IsCreated && cancelFlag[0] != 0) return;
+            float w = (water[index] + rainRate) * (1f - evaporation);
+            water[index] = math.max(0f, w);
+        }
+    }
+
+    [BurstCompile]
+    private struct ComputeFluxJob : IJobParallelFor
+    {
+        public int res;
+        public float flowRate; // 0..1-ish
+
+        [ReadOnly] public NativeArray<float> heights;
+        [ReadOnly] public NativeArray<float> water;
+
+        [WriteOnly] public NativeArray<float> fluxE;
+        [WriteOnly] public NativeArray<float> fluxW;
+        [WriteOnly] public NativeArray<float> fluxN;
+        [WriteOnly] public NativeArray<float> fluxS;
+
+        [ReadOnly] public NativeArray<int> cancelFlag;
+
+        public void Execute(int idx)
+        {
+            if (cancelFlag.IsCreated && cancelFlag[0] != 0) return;
+
+            int x = idx % res;
+            int y = idx / res;
+
+            if (x == 0 || y == 0 || x == res - 1 || y == res - 1)
+            {
+                fluxE[idx] = 0f; fluxW[idx] = 0f; fluxN[idx] = 0f; fluxS[idx] = 0f;
+                return;
+            }
+
+            float w = water[idx];
+            if (w <= 0f)
+            {
+                fluxE[idx] = 0f; fluxW[idx] = 0f; fluxN[idx] = 0f; fluxS[idx] = 0f;
+                return;
+            }
+
+            float surf = heights[idx] + w;
+
+            float dE = math.max(0f, surf - (heights[idx + 1] + water[idx + 1]));
+            float dW = math.max(0f, surf - (heights[idx - 1] + water[idx - 1]));
+            float dN = math.max(0f, surf - (heights[idx + res] + water[idx + res]));
+            float dS = math.max(0f, surf - (heights[idx - res] + water[idx - res]));
+
+            float sum = dE + dW + dN + dS;
+            if (sum <= 1e-6f)
+            {
+                fluxE[idx] = 0f; fluxW[idx] = 0f; fluxN[idx] = 0f; fluxS[idx] = 0f;
+                return;
+            }
+
+            // Move some water proportional to downhill differences
+            float move = w * flowRate;
+            float fE = move * (dE / sum);
+            float fW = move * (dW / sum);
+            float fN = move * (dN / sum);
+            float fS = move * (dS / sum);
+
+            float outSum = fE + fW + fN + fS;
+            if (outSum > w)
+            {
+                float scale = w / math.max(outSum, 1e-6f);
+                fE *= scale; fW *= scale; fN *= scale; fS *= scale;
+            }
+
+            fluxE[idx] = fE;
+            fluxW[idx] = fW;
+            fluxN[idx] = fN;
+            fluxS[idx] = fS;
+        }
+    }
+
+    [BurstCompile]
+    private struct ApplyFluxAndErodeJob : IJobParallelFor
+    {
+        public int res;
+
+        public float minSlope;
+        public float capacityK;
+        public float erodeSpeed;
+        public float depositSpeed;
+
+        [ReadOnly] public NativeArray<float> heightsIn;
+        [WriteOnly] public NativeArray<float> heightsOut;
+
+        [ReadOnly] public NativeArray<float> waterIn;
+        [WriteOnly] public NativeArray<float> waterOut;
+
+        [ReadOnly] public NativeArray<float> sedimentIn;
+        [WriteOnly] public NativeArray<float> sedimentOut;
+
+        [ReadOnly] public NativeArray<float> fluxE;
+        [ReadOnly] public NativeArray<float> fluxW;
+        [ReadOnly] public NativeArray<float> fluxN;
+        [ReadOnly] public NativeArray<float> fluxS;
+
+        [ReadOnly] public NativeArray<int> cancelFlag;
+
+        public void Execute(int idx)
+        {
+            if (cancelFlag.IsCreated && cancelFlag[0] != 0) return;
+
+            int x = idx % res;
+            int y = idx / res;
+
+            if (x == 0 || y == 0 || x == res - 1 || y == res - 1)
+            {
+                heightsOut[idx] = heightsIn[idx];
+                waterOut[idx] = waterIn[idx];
+                sedimentOut[idx] = sedimentIn[idx];
+                return;
+            }
+
+            float h = heightsIn[idx];
+            float w = waterIn[idx];
+            float s = sedimentIn[idx];
+
+            float outSum = fluxE[idx] + fluxW[idx] + fluxN[idx] + fluxS[idx];
+
+            // Inflow from neighbors toward this cell
+            float inSum =
+                fluxE[idx - 1] +       // west neighbor -> east
+                fluxW[idx + 1] +       // east neighbor -> west
+                fluxN[idx - res] +     // south neighbor -> north
+                fluxS[idx + res];      // north neighbor -> south
+
+            float wNew = math.max(0f, w - outSum + inSum);
+
+            // Advect sediment proportional to water moved:
+            // Keep it simple: move sediment with the same fraction as water outflow.
+            float fracOut = (w > 1e-6f) ? math.saturate(outSum / w) : 0f;
+            float sOut = s * fracOut;
+            float sRemain = s - sOut;
+
+            // In-sediment from neighbors (approx: their outgoing sediment share directed to us).
+            // We don't have sediment flux buffers; approximate by moving a share proportional to neighbor water flux into us.
+            // This is a pragmatic balance: realistic enough, still fast.
+            float sIn =
+                SedInFromNeighbor(idx - 1, fluxE[idx - 1], waterIn[idx - 1]) +
+                SedInFromNeighbor(idx + 1, fluxW[idx + 1], waterIn[idx + 1]) +
+                SedInFromNeighbor(idx - res, fluxN[idx - res], waterIn[idx - res]) +
+                SedInFromNeighbor(idx + res, fluxS[idx + res], waterIn[idx + res]);
+
+            float sNew = math.max(0f, sRemain + sIn);
+
+            // Capacity based on slope + water amount
+            // Use local water surface diffs approximated by outgoing flux magnitude.
+            float slope = math.max(minSlope, outSum);
+            float cap = capacityK * wNew * slope;
+
+            if (sNew > cap)
+            {
+                float amount = (sNew - cap) * depositSpeed;
+                sNew -= amount;
+                h += amount;
+            }
+            else
+            {
+                float amount = (cap - sNew) * erodeSpeed;
+                amount = math.min(amount, h);
+                h -= amount;
+                sNew += amount;
+            }
+
+            heightsOut[idx] = math.clamp(h, 0f, 1f);
+            waterOut[idx] = wNew;
+            sedimentOut[idx] = sNew;
+        }
+
+        private float SedInFromNeighbor(int nIdx, float waterFluxToUs, float neighWater)
+        {
+            // proportional sediment advection
+            if (neighWater <= 1e-6f) return 0f;
+            float frac = math.saturate(waterFluxToUs / neighWater);
+            return sedimentIn[nIdx] * frac;
+        }
+    }
+
+    [BurstCompile]
+    private struct ThermalOutflowJob : IJobParallelFor
+    {
+        public int res;
+        public float talus;
+
+        [ReadOnly] public NativeArray<float> heights;
+
+        [WriteOnly] public NativeArray<float> outE;
+        [WriteOnly] public NativeArray<float> outW;
+        [WriteOnly] public NativeArray<float> outN;
+        [WriteOnly] public NativeArray<float> outS;
+
+        [ReadOnly] public NativeArray<int> cancelFlag;
+
+        public void Execute(int idx)
+        {
+            if (cancelFlag.IsCreated && cancelFlag[0] != 0) return;
+
+            int x = idx % res;
+            int y = idx / res;
+
+            if (x == 0 || y == 0 || x == res - 1 || y == res - 1)
+            {
+                outE[idx] = 0f; outW[idx] = 0f; outN[idx] = 0f; outS[idx] = 0f;
+                return;
+            }
+
+            float h = heights[idx];
+
+            float e = heights[idx + 1];
+            float w = heights[idx - 1];
+            float n = heights[idx + res];
+            float s = heights[idx - res];
+
+            float de = h - e;
+            float dw = h - w;
+            float dn = h - n;
+            float ds = h - s;
+
+            float oe = (de > talus) ? (de - talus) * 0.25f : 0f;
+            float ow = (dw > talus) ? (dw - talus) * 0.25f : 0f;
+            float on = (dn > talus) ? (dn - talus) * 0.25f : 0f;
+            float os = (ds > talus) ? (ds - talus) * 0.25f : 0f;
+
+            float outSum = oe + ow + on + os;
+            if (outSum > h)
+            {
+                float scale = h / math.max(outSum, 1e-6f);
+                oe *= scale; ow *= scale; on *= scale; os *= scale;
+            }
+
+            outE[idx] = oe;
+            outW[idx] = ow;
+            outN[idx] = on;
+            outS[idx] = os;
+        }
+    }
+
+    [BurstCompile]
+    private struct ThermalApplyJob : IJobParallelFor
+    {
+        public int res;
+
+        [ReadOnly] public NativeArray<float> heightsIn;
+        [WriteOnly] public NativeArray<float> heightsOut;
+
+        [ReadOnly] public NativeArray<float> outE;
+        [ReadOnly] public NativeArray<float> outW;
+        [ReadOnly] public NativeArray<float> outN;
+        [ReadOnly] public NativeArray<float> outS;
+
+        [ReadOnly] public NativeArray<int> cancelFlag;
+
+        public void Execute(int idx)
+        {
+            if (cancelFlag.IsCreated && cancelFlag[0] != 0) return;
+
+            int x = idx % res;
+            int y = idx / res;
+
+            if (x == 0 || y == 0 || x == res - 1 || y == res - 1)
+            {
+                heightsOut[idx] = heightsIn[idx];
+                return;
+            }
+
+            float h = heightsIn[idx];
+            float outSum = outE[idx] + outW[idx] + outN[idx] + outS[idx];
+
+            float inSum =
+                outE[idx - 1] +
+                outW[idx + 1] +
+                outN[idx - res] +
+                outS[idx + res];
+
+            heightsOut[idx] = math.clamp(h - outSum + inSum, 0f, 1f);
+        }
+    }
+
+    [BurstCompile]
+    private struct OceanAccessJob : IJobParallelFor
+    {
+        public int res;
+        public float waterH;
+        public int sidesMask;
+        public int fadeDist;
+
+        public NativeArray<float> heights;
+        [ReadOnly] public NativeArray<int> cancelFlag;
+
+        public void Execute(int idx)
+        {
+            if (cancelFlag.IsCreated && cancelFlag[0] != 0) return;
+
+            int x = idx % res;
+            int y = idx / res;
+
+            int denom = math.max(1, fadeDist);
+            int edgeMax = res - 1;
+
+            float t = 1f;
+
+            if ((sidesMask & (int)OceanSides.North) != 0)
+            {
+                int dist = edgeMax - y;
+                if (dist <= fadeDist) t = math.min(t, dist / (float)denom);
+            }
+            if ((sidesMask & (int)OceanSides.South) != 0)
+            {
+                int dist = y;
+                if (dist <= fadeDist) t = math.min(t, dist / (float)denom);
+            }
+            if ((sidesMask & (int)OceanSides.East) != 0)
+            {
+                int dist = edgeMax - x;
+                if (dist <= fadeDist) t = math.min(t, dist / (float)denom);
+            }
+            if ((sidesMask & (int)OceanSides.West) != 0)
+            {
+                int dist = x;
+                if (dist <= fadeDist) t = math.min(t, dist / (float)denom);
+            }
+
+            heights[idx] = math.lerp(waterH, heights[idx], t);
+        }
+    }
+
+    [BurstCompile]
+    private struct HeightmapJob : IJobParallelFor
     {
         public int width, height, octaves;
         public float baseRoughness, roughness, persistence;
         public float2 offset;
+
         [WriteOnly] public NativeArray<float> heights;
         [ReadOnly] public NativeArray<int> cancelFlag;
+
         public void Execute(int idx)
         {
-            // quick cancellation check
             if (cancelFlag.IsCreated && cancelFlag[0] != 0)
                 return;
 
-            int x = idx % width, y = idx / width;
+            int x = idx % width;
+            int y = idx / width;
+
             float amp = 1f, freq = baseRoughness, sum = 0f, wsum = 0f;
             for (int o = 0; o < octaves; o++)
             {
-                // another cancellation opportunity between octaves
                 if (cancelFlag.IsCreated && cancelFlag[0] != 0)
                     return;
 
                 float sx = (x - width * 0.5f + offset.x) / width * freq;
                 float sy = (y - height * 0.5f + offset.y) / height * freq;
                 float n = noise.snoise(new float2(sx, sy)) * 0.5f + 0.5f;
+
                 sum += n * amp;
                 wsum += amp;
                 amp *= persistence;
                 freq *= roughness;
             }
+
             heights[idx] = sum / wsum;
         }
     }
 
     #endregion
 
+    // ─────────────────────────────────────────────────────────────────────────────
+    #region Native Helpers / Cleanup
+
     /// <summary>
-    /// Unsubscribes and disposes native resources when editor is closed or domain reloads.
+    /// Ensures a NativeArray exists with the desired length, reallocating if required.
+    /// Uses Allocator.Persistent because this is editor tooling and we want to reuse buffers.
     /// </summary>
+    private static void EnsureNative<T>(ref NativeArray<T> arr, int length) where T : struct
+    {
+        if (arr.IsCreated && arr.Length == length) return;
+        if (arr.IsCreated) arr.Dispose();
+        arr = new NativeArray<T>(length, Allocator.Persistent);
+    }
+
+    private void EnsureCancelFlag()
+    {
+        if (_jobCancelFlag.IsCreated) return;
+        _jobCancelFlag = new NativeArray<int>(1, Allocator.Persistent);
+        _jobCancelFlag[0] = 0;
+    }
+
+    /// <summary>
+    /// Swaps two native buffers (used for double-buffered stages).
+    /// </summary>
+    private static void Swap(ref NativeArray<float> a, ref NativeArray<float> b)
+    {
+        var t = a; a = b; b = t;
+    }
+
     public void Cleanup()
     {
         if (_isJobScheduled)
         {
-            // ensure job completes and clean up
-            _heightJobHandle.Complete();
+            _pipelineHandle.Complete();
             _isJobScheduled = false;
-            EditorApplication.update -= PollHeightmapJob;
+            EditorApplication.update -= PollPipeline;
         }
 
-        if (_heights.IsCreated)
-            _heights.Dispose();
+        if (_heights.IsCreated) _heights.Dispose();
+        if (_scratch.IsCreated) _scratch.Dispose();
 
-        if (_jobCancelFlag.IsCreated)
-            _jobCancelFlag.Dispose();
+        if (_waterA.IsCreated) _waterA.Dispose();
+        if (_waterB.IsCreated) _waterB.Dispose();
+        if (_sedA.IsCreated) _sedA.Dispose();
+        if (_sedB.IsCreated) _sedB.Dispose();
+
+        if (_fluxE.IsCreated) _fluxE.Dispose();
+        if (_fluxW.IsCreated) _fluxW.Dispose();
+        if (_fluxN.IsCreated) _fluxN.Dispose();
+        if (_fluxS.IsCreated) _fluxS.Dispose();
+
+        if (_outE.IsCreated) _outE.Dispose();
+        if (_outW.IsCreated) _outW.Dispose();
+        if (_outN.IsCreated) _outN.Dispose();
+        if (_outS.IsCreated) _outS.Dispose();
+
+        if (_jobCancelFlag.IsCreated) _jobCancelFlag.Dispose();
 
         EditorUtility.ClearProgressBar();
     }
 
-    #region Saves
+    #endregion
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    #region Saves / Favorites (unchanged)
 
     private void PromptNameAndSaveFavorite()
     {
@@ -783,11 +1515,6 @@ public class HeightMapTab
         Debug.Log($"Deleted favorite at index {index}");
     }
 
-    #endregion
-
-    // ─────────────────────────────────────────────────────────────────────────────
-    #region Helper UI Window
-
     private class FavoriteNameWindow : EditorWindow
     {
         private System.Action<string> _onSave;
@@ -814,8 +1541,39 @@ public class HeightMapTab
                 Close();
             }
             if (GUILayout.Button("Cancel"))
-            {
                 Close();
+            EditorGUILayout.EndHorizontal();
+        }
+    }
+
+    private void DrawFavoritesUI()
+    {
+        EditorGUILayout.LabelField("Favorites", EditorStyles.boldLabel);
+
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("Save Favorite"))
+            PromptNameAndSaveFavorite();
+        if (GUILayout.Button("Refresh"))
+            LoadFavorites();
+        EditorGUILayout.EndHorizontal();
+
+        if (favorites == null || favorites.Count == 0)
+        {
+            EditorGUILayout.LabelField("No favorites saved.");
+            return;
+        }
+
+        for (int i = 0; i < favorites.Count; i++)
+        {
+            var f = favorites[i];
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField(f.displayName);
+            if (GUILayout.Button("Load"))
+                LoadFavoriteIntoTerrain(f);
+            if (GUILayout.Button("Delete"))
+            {
+                DeleteFavorite(i);
+                break;
             }
             EditorGUILayout.EndHorizontal();
         }
