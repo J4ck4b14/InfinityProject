@@ -24,8 +24,9 @@ public partial class AnimalAgingSystem : SystemBase
         double scale = TimeConfig.YearScale[gt.ScaleIndex];
         double baseYearsPerSec = TimeConfig.BaseYearsPerSecond;
 
-        // Compute scaled years this frame
-        double dtYears = baseYearsPerSec * SystemAPI.Time.DeltaTime * scale;
+        // Compute scaled years this frame using test shim to allow deterministic test delta
+        double deltaSeconds = TimeTestShim.EffectiveDeltaSeconds(SystemAPI.Time.DeltaTime);
+        double dtYears = baseYearsPerSec * deltaSeconds * scale;
         float fYears = (float)dtYears;
 
         var job = new AgingJob { DeltaYears = fYears };

@@ -1,6 +1,7 @@
 ﻿using Unity.Burst;
 using Unity.Entities;
 using Unity.Mathematics;
+using InfinityProject.Time;
 
 /// <summary>
 /// Applies dynamic exponential decay to each MemoryEvent’s EmotionalWeight,
@@ -67,7 +68,9 @@ public partial class MemorySystem : SystemBase
 
     protected override void OnUpdate()
     {
-        var job = new MemoryDecayJob { DeltaTime = SystemAPI.Time.DeltaTime };
+        // Use test shim to allow deterministic small delta during unit tests
+        float dt = TimeTestShim.EffectiveDeltaSeconds((float)SystemAPI.Time.DeltaTime);
+        var job = new MemoryDecayJob { DeltaTime = dt };
         var handle = job.ScheduleParallel(Dependency);
         Dependency = handle;
     }

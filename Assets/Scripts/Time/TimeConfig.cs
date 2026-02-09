@@ -2,7 +2,7 @@ namespace InfinityProject.Time
 {
     /// <summary>
     /// Configuration for how fast in-game time passes relative to real time.
-    /// </summary 
+    /// </summary>
     public static class TimeConfig
     {
         /// <summary>
@@ -34,7 +34,7 @@ namespace InfinityProject.Time
         /// [3]=1 week in 5 min, [4]=1 month in 5 min,
         /// [5]=1 year in 5 min, [6]=1 decade in 5 min, [7]=1 century in 5 min.
         /// </summary>
-        public static readonly double[] YearScale = new[]
+        public static readonly double[] YearScale = new double[]
         {
             0.0,                         // Paused
             1.0,                         // 1x   normal

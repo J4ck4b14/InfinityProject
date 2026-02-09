@@ -60,11 +60,14 @@ public partial class AnimalReproductionSystem : SystemBase
 
     protected override void OnUpdate()
     {
-        //2. Compute scaled years per frame exactly once
+        //2. Compute scaled years per frame
         var gt = SystemAPI.GetSingleton<GameTime>();
         double scale = TimeConfig.YearScale[gt.ScaleIndex];
         double baseY = TimeConfig.BaseYearsPerSecond;
-        float deltaYears = (float)(baseY * SystemAPI.Time.DeltaTime * scale);
+
+        // Use test shim to allow deterministic delta in unit tests
+        double deltaSeconds = TimeTestShim.EffectiveDeltaSeconds(SystemAPI.Time.DeltaTime);
+        float deltaYears = (float)(baseY * deltaSeconds * scale);
 
         //3. Create a parallel ECB
         var ecb = _ecbSystem.CreateCommandBuffer().AsParallelWriter();
