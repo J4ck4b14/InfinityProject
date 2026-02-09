@@ -48,13 +48,13 @@ public class WorldBuilderTool : EditorWindow
         switch (currentTab)
         {
             case Tab.Map:
-                heightMapTab.Draw();
+                heightMapTab?.Draw();
                 break;
             case Tab.Flora:
-                floraTab.Draw();
+                floraTab?.Draw();
                 break;
             case Tab.Structures:
-                structureTab.Draw();
+                structureTab?.Draw();
                 break;
         }
     }
@@ -81,8 +81,8 @@ public class WorldBuilderTool : EditorWindow
     /// </summary>
     private void OnDisable()
     {
-        //heightMapTab.Cleanup();
-        floraTab.Cleanup();
-        structureTab.Cleanup();
+        heightMapTab?.Cleanup();
+        floraTab?.Cleanup();
+        structureTab?.Cleanup();
     }
 }

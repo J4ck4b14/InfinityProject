@@ -4,6 +4,8 @@ using Unity.Mathematics;
 using Unity.Jobs;
 using Unity.Collections;
 using Unity.Burst;
+using System.IO;
+using System.Collections.Generic;
 
 /// <summary>
 /// Editor tab for multi‐tile, high‐performance procedural heightmap generation
@@ -63,11 +65,11 @@ public class HeightMapTab
     [SerializeField] private Terrain neighborW, neighborE;
     [SerializeField] private Terrain neighborSW, neighborS, neighborSE;
 
-    [Header("Ocean / Beach Access")]
-    float whatever = 0.5f; // This is a placeholder to make the inspector look nice (not even)
+    // Ocean / Beach Access
     [Tooltip("Which edges of this tile should gently slope into water")]
     [System.Flags]
     private enum OceanSides { None = 0, North = 1 << 0, South = 1 << 1, East = 1 << 2, West = 1 << 3, All = North | South | East | West }
+    [Header("Ocean / Beach Access")]
     [Tooltip("Edges to carve toward water level")]
     private OceanSides oceanSides = OceanSides.None;
     [Tooltip("Fade distance inland (samples)")]
@@ -89,10 +91,35 @@ public class HeightMapTab
     /// <summary>Flat [res×res] buffer of heights [0..1].</summary>
     private NativeArray<float> _heights;
 
+    // Non-blocking job state
+    private JobHandle _heightJobHandle;
+    private bool _isJobScheduled = false;
+    private int _pendingRes = 0;
+    private bool _cancelRequested = false;
+
+    // Cancellation flag passed into the job (0 = run,1 = cancel)
+    private NativeArray<int> _jobCancelFlag;
+
+    #endregion
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    #region Favorites
+
+    private const int MaxFavorites = 5;
+    private List<SavedHeightmap> favorites = new List<SavedHeightmap>(MaxFavorites);
+    private int selectedFavoriteIndex = -1;
+    private const string FavoriteFolder = "Assets/WorldBuilderSaved";
+
     #endregion
 
     // ─────────────────────────────────────────────────────────────────────────────
     #region UI
+
+    // Auto-load favorites when the tab is created
+    public HeightMapTab()
+    {
+        LoadFavorites();
+    }
 
     public void Draw()
     {
@@ -161,8 +188,55 @@ public class HeightMapTab
         targetTerrain = (Terrain)EditorGUILayout.ObjectField("Target Terrain", targetTerrain, typeof(Terrain), true);
 
         EditorGUILayout.Space();
+        EditorGUILayout.BeginHorizontal();
         if (GUILayout.Button("Generate Tile (Fast + Features)"))
+        {
+            _cancelRequested = false;
             GenerateTileFast();
+        }
+        // Cancel button
+        if (GUILayout.Button("Cancel"))
+        {
+            RequestCancel();
+        }
+        EditorGUILayout.EndHorizontal();
+
+        EditorGUILayout.Space();
+        DrawFavoritesUI();
+    }
+
+    private void DrawFavoritesUI()
+    {
+        EditorGUILayout.LabelField("Favorites (max5)", EditorStyles.boldLabel);
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("Refresh"))
+            LoadFavorites();
+        if (GUILayout.Button("Save Current"))
+            PromptNameAndSaveFavorite();
+        EditorGUILayout.EndHorizontal();
+
+        // List favorites
+        for (int i = 0; i < MaxFavorites; i++)
+        {
+            if (i < favorites.Count)
+            {
+                var fav = favorites[i];
+                EditorGUILayout.BeginHorizontal();
+                if (GUILayout.Button(fav.displayName, GUILayout.Width(200)))
+                {
+                    LoadFavoriteIntoTerrain(fav);
+                }
+                if (GUILayout.Button("Delete", GUILayout.Width(60)))
+                {
+                    DeleteFavorite(i);
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            else
+            {
+                EditorGUILayout.LabelField($"Slot {i + 1}: Empty");
+            }
+        }
     }
 
     #endregion
@@ -189,8 +263,13 @@ public class HeightMapTab
         if (_heights.IsCreated) _heights.Dispose();
         _heights = new NativeArray<float>(total, Allocator.Persistent);
 
-        // 3) Fractal noise (Burst job)
-        new HeightmapJob
+        // prepare cancel flag
+        if (_jobCancelFlag.IsCreated) _jobCancelFlag.Dispose();
+        _jobCancelFlag = new NativeArray<int>(1, Allocator.Persistent);
+        _jobCancelFlag[0] = 0;
+
+        // 3) Fractal noise (Burst job) - schedule non-blocking
+        var job = new HeightmapJob
         {
             width = res,
             height = res,
@@ -199,16 +278,74 @@ public class HeightMapTab
             persistence = persistence,
             octaves = octaves,
             offset = new float2(globalSeed + tileX * res,
-                                      globalSeed + tileY * res),
-            heights = _heights
-        }.Schedule(total, 64).Complete();
+                                  globalSeed + tileY * res),
+            heights = _heights,
+            cancelFlag = _jobCancelFlag
+        };
 
-        // 4) Ridges, erosion, river carve
+        _heightJobHandle = job.Schedule(total, 64);
+        _isJobScheduled = true;
+        _pendingRes = res;
+        _cancelRequested = false;
+
+        // Start polling in editor update
+        EditorApplication.update -= PollHeightmapJob;
+        EditorApplication.update += PollHeightmapJob;
+    }
+
+    private void RequestCancel()
+    {
+        _cancelRequested = true;
+        // signal job to cancel as early as possible
+        if (_jobCancelFlag.IsCreated)
+            _jobCancelFlag[0] = 1;
+    }
+
+    private void PollHeightmapJob()
+    {
+        if (!_isJobScheduled) return;
+
+        if (_cancelRequested)
+        {
+            // Try to complete quickly then cleanup
+            _heightJobHandle.Complete();
+            if (_heights.IsCreated) _heights.Dispose();
+            if (_jobCancelFlag.IsCreated) _jobCancelFlag.Dispose();
+            _isJobScheduled = false;
+            _pendingRes = 0;
+            EditorApplication.update -= PollHeightmapJob;
+            EditorUtility.ClearProgressBar();
+            Debug.Log("Heightmap generation cancelled.");
+            return;
+        }
+
+        // Show a waiting progress while job runs
+        if (!_heightJobHandle.IsCompleted)
+        {
+            EditorUtility.DisplayProgressBar("Generating Heightmap", "Computing noise (Burst)...", 0.1f);
+            return;
+        }
+
+        // Complete the job and proceed with feature steps
+        _heightJobHandle.Complete();
+
+        int res = _pendingRes;
+
+        // 4) Ridges, erosion, river carve with progress updates
+        EditorUtility.DisplayProgressBar("Generating Heightmap", "Applying ridges...", 0.3f);
         if (useRidges) ApplyRidgeNoise(res, _heights, ridgeStrength);
-        if (doThermalErode) ThermalErode(res, _heights, erosionPasses, talusAngle);
+
+        if (doThermalErode)
+        {
+            // ThermalErode will update progress during passes
+            ThermalErode(res, _heights, erosionPasses, talusAngle);
+        }
+
+        EditorUtility.DisplayProgressBar("Generating Heightmap", "Carving rivers...", 0.75f);
         CarveRiver(res, _heights);
 
         // 5) Stitch neighbors for seamless borders
+        EditorUtility.DisplayProgressBar("Generating Heightmap", "Blending with neighbors...", 0.8f);
         BlendWithNeighbors(res, _heights);
 
         // 6) Ocean/beach access carving (if any)
@@ -216,10 +353,22 @@ public class HeightMapTab
             ApplyOceanAccess(res, _heights, waterLevel, oceanSides, beachFadeDistance);
 
         // 7) Write into TerrainData (and pad +1 for Unity)
+        EditorUtility.DisplayProgressBar("Generating Heightmap", "Applying to Terrain...", 0.95f);
         ApplyBufferToTerrain(_heights, res);
 
         // 8) Cleanup
-        _heights.Dispose();
+        if (_heights.IsCreated)
+            _heights.Dispose();
+        if (_jobCancelFlag.IsCreated)
+            _jobCancelFlag.Dispose();
+
+        _isJobScheduled = false;
+        _pendingRes = 0;
+
+        EditorApplication.update -= PollHeightmapJob;
+        EditorUtility.ClearProgressBar();
+
+        SceneView.RepaintAll();
     }
 
     private void CreateNewTerrain()
@@ -267,51 +416,73 @@ public class HeightMapTab
 
     /// <summary>
     /// If any neighbor is assigned, copy its adjacent border heights
-    /// into our buffer so shared edges match perfectly.
+    /// into our buffer so shared edges match perfectly. Uses sampling of neighbor
+    /// terrains in normalized coordinates so differing heightmap resolutions are handled.
     /// </summary>
     private void BlendWithNeighbors(int res, NativeArray<float> buf)
     {
-        // 1) North neighbor → copy its south row
+        // Helper to convert interpolated neighbor world height to normalized neighbor height
+        float SampleNeighborNormalizedHeight(Terrain neigh, float u, float v)
+        {
+            if (neigh == null) return 0f;
+            // World position on neighbor terrain at normalized coords
+            var nd = neigh.terrainData;
+            Vector3 worldPos = neigh.transform.position + new Vector3(u * nd.size.x, 0f, v * nd.size.z);
+            float worldH = neigh.SampleHeight(worldPos);
+            // Convert to normalized [0..1] relative to neighbor terrain height
+            float normalized = nd.size.y > 0f ? worldH / nd.size.y : 0f;
+            return Mathf.Clamp01(normalized);
+        }
+
+        // 1) North neighbor → copy its south edge (v =0)
         if (neighborN != null)
         {
-            var nh = neighborN.terrainData.GetHeights(0, 0, res, 1);
             for (int x = 0; x < res; x++)
-                buf[(res - 1) * res + x] = nh[0, x];
+            {
+                float u = (res == 1) ? 0f : (float)x / (res - 1);
+                buf[(res - 1) * res + x] = SampleNeighborNormalizedHeight(neighborN, u, 0f);
+            }
         }
 
-        // 2) South neighbor → copy its north row
+        // 2) South neighbor → copy its north edge (v =1)
         if (neighborS != null)
         {
-            var sh = neighborS.terrainData.GetHeights(0, res, res, 1);
             for (int x = 0; x < res; x++)
-                buf[x] = sh[0, x];
+            {
+                float u = (res == 1) ? 0f : (float)x / (res - 1);
+                buf[0 * res + x] = SampleNeighborNormalizedHeight(neighborS, u, 1f);
+            }
         }
 
-        // 3) East neighbor → copy its west column
+        // 3) East neighbor → copy its west edge (u =0)
         if (neighborE != null)
         {
-            var eh = neighborE.terrainData.GetHeights(0, 0, 1, res);
             for (int y = 0; y < res; y++)
-                buf[y * res + (res - 1)] = eh[y, 0];
+            {
+                float v = (res == 1) ? 0f : (float)y / (res - 1);
+                buf[y * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborE, 0f, v);
+            }
         }
 
-        // 4) West neighbor → copy its east column
+        // 4) West neighbor → copy its east edge (u =1)
         if (neighborW != null)
         {
-            var wh = neighborW.terrainData.GetHeights(res, 0, 1, res);
             for (int y = 0; y < res; y++)
-                buf[y * res + 0] = wh[y, 0];
+            {
+                float v = (res == 1) ? 0f : (float)y / (res - 1);
+                buf[y * res + 0] = SampleNeighborNormalizedHeight(neighborW, 1f, v);
+            }
         }
 
-        // 5) Four corners (optional exact match)
+        // 5) Four corners (optional exact match) - sample neighbor corner positions
         if (neighborNE != null)
-            buf[(res - 1) * res + (res - 1)] = neighborNE.terrainData.GetHeight(0, 0);
+            buf[(res - 1) * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborNE, 0f, 0f);
         if (neighborNW != null)
-            buf[(res - 1) * res + 0] = neighborNW.terrainData.GetHeight(res, 0);
+            buf[(res - 1) * res + 0] = SampleNeighborNormalizedHeight(neighborNW, 1f, 0f);
         if (neighborSE != null)
-            buf[0 * res + (res - 1)] = neighborSE.terrainData.GetHeight(0, res);
+            buf[0 * res + (res - 1)] = SampleNeighborNormalizedHeight(neighborSE, 0f, 1f);
         if (neighborSW != null)
-            buf[0 * res + 0] = neighborSW.terrainData.GetHeight(res, res);
+            buf[0 * res + 0] = SampleNeighborNormalizedHeight(neighborSW, 1f, 1f);
     }
 
     #endregion
@@ -331,6 +502,11 @@ public class HeightMapTab
     private void ThermalErode(int res, NativeArray<float> buf, int passes, float talus)
     {
         for (int p = 0; p < passes; p++)
+        {
+            // update progress for erosion
+            if (passes > 0)
+                EditorUtility.DisplayProgressBar("Generating Heightmap", $"Thermal erosion pass {p + 1}/{passes}", 0.3f + 0.4f * ((float)p / passes));
+
             for (int y = 1; y < res - 1; y++)
                 for (int x = 1; x < res - 1; x++)
                 {
@@ -348,6 +524,10 @@ public class HeightMapTab
                         }
                     }
                 }
+        }
+
+        // Clear progress from erosion step
+        EditorUtility.ClearProgressBar();
     }
 
     private void CarveRiver(int res, NativeArray<float> buf)
@@ -394,12 +574,21 @@ public class HeightMapTab
         public float baseRoughness, roughness, persistence;
         public float2 offset;
         [WriteOnly] public NativeArray<float> heights;
+        [ReadOnly] public NativeArray<int> cancelFlag;
         public void Execute(int idx)
         {
+            // quick cancellation check
+            if (cancelFlag.IsCreated && cancelFlag[0] != 0)
+                return;
+
             int x = idx % width, y = idx / width;
             float amp = 1f, freq = baseRoughness, sum = 0f, wsum = 0f;
             for (int o = 0; o < octaves; o++)
             {
+                // another cancellation opportunity between octaves
+                if (cancelFlag.IsCreated && cancelFlag[0] != 0)
+                    return;
+
                 float sx = (x - width * 0.5f + offset.x) / width * freq;
                 float sy = (y - height * 0.5f + offset.y) / height * freq;
                 float n = noise.snoise(new float2(sx, sy)) * 0.5f + 0.5f;
@@ -409,6 +598,226 @@ public class HeightMapTab
                 freq *= roughness;
             }
             heights[idx] = sum / wsum;
+        }
+    }
+
+    #endregion
+
+    /// <summary>
+    /// Unsubscribes and disposes native resources when editor is closed or domain reloads.
+    /// </summary>
+    public void Cleanup()
+    {
+        if (_isJobScheduled)
+        {
+            // ensure job completes and clean up
+            _heightJobHandle.Complete();
+            _isJobScheduled = false;
+            EditorApplication.update -= PollHeightmapJob;
+        }
+
+        if (_heights.IsCreated)
+            _heights.Dispose();
+
+        if (_jobCancelFlag.IsCreated)
+            _jobCancelFlag.Dispose();
+
+        EditorUtility.ClearProgressBar();
+    }
+
+    #region Saves
+
+    private void PromptNameAndSaveFavorite()
+    {
+        if (!_heights.IsCreated)
+        {
+            EditorUtility.DisplayDialog("No Heightmap Data",
+                "Please generate a heightmap first before saving to favorites.",
+                "Got it");
+            return;
+        }
+
+        string defaultName = $"Tile_{tileX}_{tileY}_" + System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
+        FavoriteNameWindow.Show((name) => OnSaveFavorite(name), defaultName);
+    }
+
+    private void OnSaveFavorite(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            EditorUtility.DisplayDialog("Invalid Name", "Please provide a non-empty name.", "OK");
+            return;
+        }
+
+        // Ensure favorites folder exists
+        if (!AssetDatabase.IsValidFolder(FavoriteFolder))
+        {
+            AssetDatabase.CreateFolder("Assets", "WorldBuilderSaved");
+        }
+
+        // Refresh favorites list from disk
+        LoadFavorites();
+
+        // Manage max favorites: confirm overwrite if full
+        if (favorites.Count >= MaxFavorites)
+        {
+            var olderAsset = favorites[favorites.Count - 1];
+            string message = $"You have {MaxFavorites} favorites saved.\n\n" +
+                             $"Do you want to replace the oldest favorite?\n{olderAsset.displayName}";
+            if (!EditorUtility.DisplayDialog("Overwrite Favorite?",
+                                             message,
+                                             "Replace", "Cancel"))
+                return;
+
+            // Remove the oldest asset file
+            string oldPath = AssetDatabase.GetAssetPath(olderAsset);
+            AssetDatabase.DeleteAsset(oldPath);
+            favorites.RemoveAt(favorites.Count - 1);
+        }
+
+        // Create and configure the new SavedHeightmap asset
+        SavedHeightmap saved = ScriptableObject.CreateInstance<SavedHeightmap>();
+        saved.displayName = name;
+        saved.terrainSide = terrainSide;
+        saved.terrainHeight = terrainHeight;
+        saved.terrainPosition = targetTerrain != null ? targetTerrain.transform.position : Vector3.zero;
+
+        // heights array
+        int res = mapSizes[mapIndex];
+        int hmRes = res + 1;
+        saved.heightmapResolution = hmRes;
+        saved.heights = new float[res * res];
+        NativeArray<float>.Copy(_heights, saved.heights, res * res);
+
+        // record creation time
+        saved.createdTime = System.DateTime.Now.ToOADate();
+
+        // Save the asset to the project
+        string assetPath = Path.Combine(FavoriteFolder, saved.displayName + ".asset");
+        AssetDatabase.CreateAsset(saved, assetPath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        // Add to favorites list
+        favorites.Insert(0, saved);
+        if (favorites.Count > MaxFavorites)
+            favorites.RemoveRange(MaxFavorites, favorites.Count - MaxFavorites);
+
+        Debug.Log($"Saved current heightmap to favorites: {saved.displayName}");
+    }
+
+    private void LoadFavorites()
+    {
+        favorites.Clear();
+
+        // Ensure the favorites folder exists
+        if (!AssetDatabase.IsValidFolder(FavoriteFolder))
+            return;
+
+        // Load all SavedHeightmap assets in the favorites folder
+        string[] guids = AssetDatabase.FindAssets("t:SavedHeightmap", new[] { FavoriteFolder });
+        foreach (string guid in guids)
+        {
+            string assetPath = AssetDatabase.GUIDToAssetPath(guid);
+            SavedHeightmap heightmap = AssetDatabase.LoadAssetAtPath<SavedHeightmap>(assetPath);
+            if (heightmap != null)
+                favorites.Add(heightmap);
+        }
+
+        // Sort favorites by creation time (newest first)
+        favorites.Sort((a, b) => b.createdTime.CompareTo(a.createdTime));
+
+        Debug.Log($"Loaded {favorites.Count} favorites.");
+    }
+
+    private void LoadFavoriteIntoTerrain(SavedHeightmap saved)
+    {
+        // Create new terrain if targetTerrain is not assigned
+        if (targetTerrain == null)
+        {
+            CreateNewTerrain();
+        }
+
+        // Dump heights into a new array
+        int res = saved.heightmapResolution - 1;
+        int hmRes = saved.heightmapResolution;
+        var arr = new float[hmRes, hmRes];
+        for (int y = 0; y < res; y++)
+            for (int x = 0; x < res; x++)
+                arr[y, x] = saved.heights[y * res + x];
+        // pad right column
+        for (int y = 0; y < res; y++)
+            arr[y, res] = arr[y, res - 1];
+        // pad top row
+        for (int x = 0; x < hmRes; x++)
+            arr[res, x] = arr[res - 1, x];
+
+        // Apply to terrain
+        var td = targetTerrain.terrainData;
+        td.heightmapResolution = hmRes;
+        td.size = new Vector3(saved.terrainSide, saved.terrainHeight, saved.terrainSide);
+        td.SetHeights(0, 0, arr);
+
+        // Move terrain object
+        targetTerrain.transform.position = saved.terrainPosition;
+
+        EditorUtility.SetDirty(td);
+
+        Debug.Log($"Loaded favorite heightmap: {saved.displayName}");
+    }
+
+    private void DeleteFavorite(int index)
+    {
+        if (index < 0 || index >= favorites.Count)
+            return;
+
+        // Remove the asset from the project
+        string assetPath = AssetDatabase.GetAssetPath(favorites[index]);
+        AssetDatabase.DeleteAsset(assetPath);
+        AssetDatabase.SaveAssets();
+        AssetDatabase.Refresh();
+
+        // Remove from favorites list
+        favorites.RemoveAt(index);
+
+        Debug.Log($"Deleted favorite at index {index}");
+    }
+
+    #endregion
+
+    // ─────────────────────────────────────────────────────────────────────────────
+    #region Helper UI Window
+
+    private class FavoriteNameWindow : EditorWindow
+    {
+        private System.Action<string> _onSave;
+        private string _name = "";
+
+        public static void Show(System.Action<string> onSave, string defaultName)
+        {
+            var w = CreateInstance<FavoriteNameWindow>();
+            w._onSave = onSave;
+            w._name = defaultName;
+            w.titleContent = new GUIContent("Name Favorite");
+            w.position = new Rect(Screen.width / 2, Screen.height / 2, 420, 70);
+            w.ShowModalUtility();
+        }
+
+        private void OnGUI()
+        {
+            EditorGUILayout.LabelField("Enter a name for this favorite:", EditorStyles.wordWrappedLabel);
+            _name = EditorGUILayout.TextField(_name);
+            EditorGUILayout.BeginHorizontal();
+            if (GUILayout.Button("Save"))
+            {
+                _onSave?.Invoke(_name);
+                Close();
+            }
+            if (GUILayout.Button("Cancel"))
+            {
+                Close();
+            }
+            EditorGUILayout.EndHorizontal();
         }
     }
 

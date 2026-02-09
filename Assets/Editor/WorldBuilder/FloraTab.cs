@@ -191,6 +191,7 @@ public class FloraTab
 
     /// <summary>
     /// Batches instantiation to avoid editor freeze: spawns _batchSize per frame.
+    /// Shows a progress bar during the operation.
     /// </summary>
     private void SpawnUpdate()
     {
@@ -203,30 +204,45 @@ public class FloraTab
             var prefab = floraPrefabs[rnd.Next(floraPrefabs.Count)];
             if (prefab == null) continue;
 
-            // Instantiate under parent
-            var inst = Object.Instantiate(prefab, _spawnSamples[i], Quaternion.identity, _spawnParent);
+            // Instantiate under parent (use PrefabUtility to preserve prefab connection when possible)
+            var instObj = PrefabUtility.InstantiatePrefab(prefab) as GameObject;
+            if (instObj == null) continue;
+            var inst = instObj.transform as Transform;
+            inst.position = _spawnSamples[i];
+            inst.rotation = Quaternion.identity;
+            inst.parent = _spawnParent;
 
             // Apply scale variation
             float factor = 1f + ((float)rnd.NextDouble() * 2f - 1f) * scaleVariation;
-            inst.transform.localScale = Vector3.one * factor;
+            inst.localScale = Vector3.one * factor;
 
             // Apply hue variation if material supports _Color
             var rend = inst.GetComponentInChildren<Renderer>();
-            if (rend != null && rend.sharedMaterial.HasProperty("_Color"))
+            if (rend != null && rend.sharedMaterial != null && rend.sharedMaterial.HasProperty("_Color"))
             {
-                Color col = rend.sharedMaterial.color;
+                var mat = new Material(rend.sharedMaterial);
+                Color col = mat.color;
                 Color.RGBToHSV(col, out float h, out float s, out float v);
                 h = Mathf.Repeat(h + Random.Range(-hueVariation, hueVariation), 1f);
-                rend.sharedMaterial.color = Color.HSVToRGB(h, s, v);
+                mat.color = Color.HSVToRGB(h, s, v);
+                rend.material = mat;
             }
         }
 
         _spawnIndex = end;
 
+        // Update progress bar
+        if (_spawnSamples != null && _spawnSamples.Count > 0)
+        {
+            float prog = (float)_spawnIndex / _spawnSamples.Count;
+            EditorUtility.DisplayProgressBar("Generating Flora", $"Spawning {_spawnIndex}/{_spawnSamples.Count}", prog);
+        }
+
         // When done, cleanup and combine for performance
         if (_spawnIndex >= _spawnSamples.Count)
         {
             EditorApplication.update -= SpawnUpdate;
+            EditorUtility.ClearProgressBar();
             ChunkAndCombine();
             polygonPoints.Clear();
             SceneView.RepaintAll();
@@ -350,5 +366,6 @@ public class FloraTab
             SceneView.duringSceneGui -= OnSceneGUI;
             isDrawing = false;
         }
+        EditorUtility.ClearProgressBar();
     }
 }

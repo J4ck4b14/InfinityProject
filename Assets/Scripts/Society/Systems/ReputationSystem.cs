@@ -28,33 +28,26 @@ public partial class ReputationSystem : SystemBase
     protected override void OnUpdate()
     {
         float deltaTime = SystemAPI.Time.DeltaTime;
-        var ecb = _ecbSystem.CreateCommandBuffer().AsParallelWriter();
+        var ecb = _ecbSystem.CreateCommandBuffer();
 
-        // Collect deltas into a NativeList
-        var localDeltas = new NativeList<LocalDelta>(Allocator.TempJob);
+        // Collect deltas into a NativeList by reading component arrays from an EntityQuery
+        var localDeltas = new NativeList<LocalDelta>(Allocator.Temp);
 
-        var collectHandle = Entities
-            .WithName("CollectLocalReputationDeltas")
-            .ForEach((Entity e, in LocalReputationDelta lrd) =>
+        var lrdQuery = GetEntityQuery(ComponentType.ReadOnly<LocalReputationDelta>());
+        using (var lrdEntities = lrdQuery.ToEntityArray(Allocator.Temp))
+        using (var lrdData = lrdQuery.ToComponentDataArray<LocalReputationDelta>(Allocator.Temp))
+        {
+            for (int i = 0; i < lrdEntities.Length; i++)
             {
-                localDeltas.Add(new LocalDelta { Source = e, Delta = lrd.DeltaR });
-            })
-            .ScheduleParallel(Dependency);
+                localDeltas.Add(new LocalDelta { Source = lrdEntities[i], Delta = lrdData[i].DeltaR });
+            }
 
-        // Ensure collection completes before processing propagation
-        collectHandle.Complete();
-
-        // Clear LocalReputationDelta by removing the component via ECB in a job
-        var clearHandle = Entities
-            .WithName("ClearLocalReputationDeltas")
-            .ForEach((Entity e, int entityInQueryIndex) =>
+            // Clear LocalReputationDelta by enqueueing removals on the ECB (single-threaded)
+            for (int i = 0; i < lrdEntities.Length; i++)
             {
-                ecb.RemoveComponent<LocalReputationDelta>(entityInQueryIndex, e);
-            })
-            .ScheduleParallel(Dependency);
-
-        _ecbSystem.AddJobHandleForProducer(clearHandle);
-        clearHandle.Complete();
+                ecb.RemoveComponent<LocalReputationDelta>(lrdEntities[i]);
+            }
+        }
 
         // If no deltas, just run decay and exit
         if (localDeltas.Length == 0)
@@ -62,19 +55,7 @@ public partial class ReputationSystem : SystemBase
             localDeltas.Dispose();
             // Decay pass
             float decay = math.exp(-ReputationConfig.Lambda * deltaTime);
-            Entities
-                .WithName("DecayReputationScores")
-                .ForEach((ref DynamicBuffer<SocialBridge> buf) =>
-                {
-                    for (int i = 0; i < buf.Length; i++)
-                    {
-                        var b = buf[i];
-                        b.ReputationScore = MultiplyProfile(b.ReputationScore, decay);
-                        buf[i] = b;
-                    }
-                })
-                .ScheduleParallel();
-
+            new DecayJob { Decay = decay }.ScheduleParallel();
             return;
         }
 
@@ -215,18 +196,7 @@ public partial class ReputationSystem : SystemBase
 
         // Apply temporal decay to every reputation score (jobified)
         float decayVal = math.exp(-ReputationConfig.Lambda * deltaTime);
-        Entities
-            .WithName("DecayReputationScores")
-            .ForEach((ref DynamicBuffer<SocialBridge> buf) =>
-            {
-                for (int i = 0; i < buf.Length; i++)
-                {
-                    var b = buf[i];
-                    b.ReputationScore = MultiplyProfile(b.ReputationScore, decayVal);
-                    buf[i] = b;
-                }
-            })
-            .ScheduleParallel();
+        new DecayJob { Decay = decayVal }.ScheduleParallel();
     }
 
     // Helper struct to batch deltas
@@ -265,4 +235,19 @@ public partial class ReputationSystem : SystemBase
         Courage = a.Courage + b.Courage,
         Temperance = a.Temperance + b.Temperance
     };
+
+    [BurstCompile]
+    private partial struct DecayJob : IJobEntity
+    {
+        public float Decay;
+        public void Execute(ref DynamicBuffer<SocialBridge> buf)
+        {
+            for (int i =0; i < buf.Length; i++)
+            {
+                var b = buf[i];
+                b.ReputationScore = MultiplyProfile(b.ReputationScore, Decay);
+                buf[i] = b;
+            }
+        }
+    }
 }

@@ -153,44 +153,54 @@ public class StructureTab
 
     /// <summary>
     /// Handles SceneView mouse/keyboard events for drawing and entry picking.
-    /// Shift+Click to add; Enter to finalize polygon.
+    /// Mouse click to add; Enter to finalize polygon.
     /// </summary>
     private void OnSceneGUI(SceneView sv)
     {
-        var mask = 1 << LayerMask.NameToLayer("Terrain");
+        // Use layer mask safely
+        int layer = LayerMask.NameToLayer("Terrain");
+        int mask = layer >= 0 ? (1 << layer) : Physics.DefaultRaycastLayers;
+
         var e = Event.current;
         var ray = HandleUtility.GUIPointToWorldRay(e.mousePosition);
 
-        // Raycast against terrain
-        if (Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, mask) &&
-            e.type == UnityEngine.EventType.KeyDown && e.keyCode == KeyCode.Return)
+        // Raycast against terrain to get a valid hit point for placement
+        bool hitTerrain = Physics.Raycast(ray, out RaycastHit hit, Mathf.Infinity, mask);
 
+        // Mouse click handling: add points or pick entry
+        if (e.type == UnityEngine.EventType.MouseDown && e.button == 0)
+        {
+            if (hitTerrain)
             {
-                // Drawing mode
                 if (isDrawing)
-            {
-                // Close polygon if near start
-                if (polygonPoints.Count > 2 &&
-                    Vector3.Distance(hit.point, polygonPoints[0]) < 2f)
                 {
-                    isDrawing = false;
-                    SceneView.duringSceneGui -= OnSceneGUI;
-                }
-                else
-                {
-                    polygonPoints.Add(hit.point);
-                }
-            }
-            // Entry‐picking mode
-            else if (settingEntry)
-            {
-                entryPoint = hit.point;
-                settingEntry = false;
-                SceneView.duringSceneGui -= OnSceneGUI;
-            }
+                    // Close polygon if near start
+                    if (polygonPoints.Count > 2 &&
+                        Vector3.Distance(hit.point, polygonPoints[0]) < 2f)
+                    {
+                        isDrawing = false;
+                        SceneView.duringSceneGui -= OnSceneGUI;
+                    }
+                    else
+                    {
+                        polygonPoints.Add(hit.point);
+                    }
 
-            e.Use();
-            SceneView.RepaintAll();
+                    e.Use();
+                    SceneView.RepaintAll();
+                    return;
+                }
+
+                if (settingEntry)
+                {
+                    entryPoint = hit.point;
+                    settingEntry = false;
+                    SceneView.duringSceneGui -= OnSceneGUI;
+                    e.Use();
+                    SceneView.RepaintAll();
+                    return;
+                }
+            }
         }
 
         // Live outline
@@ -198,15 +208,19 @@ public class StructureTab
         if (polygonPoints.Count > 1)
         {
             Handles.DrawAAPolyLine(4, polygonPoints.ToArray());
+            Vector3 liveTarget = hitTerrain ? hit.point : ray.GetPoint(10f);
             if (isDrawing)
-                Handles.DrawLine(polygonPoints[^1], HandleUtility.GUIPointToWorldRay(e.mousePosition).origin);
+                Handles.DrawLine(polygonPoints[polygonPoints.Count - 1], liveTarget);
         }
 
         // Finalize on Enter
         if (e.type == UnityEngine.EventType.KeyDown && e.keyCode == KeyCode.Return)
         {
-            isDrawing = false;
-            SceneView.duringSceneGui -= OnSceneGUI;
+            if (isDrawing)
+            {
+                isDrawing = false;
+                SceneView.duringSceneGui -= OnSceneGUI;
+            }
             e.Use();
         }
 
@@ -251,7 +265,7 @@ public class StructureTab
             var ps = _pendingSpawns[i];
             if (ps.entry.prefab == null) continue;
 
-            // Instantiate prefab
+            // Instantiate prefab (preserve prefab linkage if possible)
             var go = (GameObject)PrefabUtility.InstantiatePrefab(ps.entry.prefab);
             Undo.RegisterCreatedObjectUndo(go, "Spawn Structure");
             go.transform.position = ps.position;
@@ -261,14 +275,16 @@ public class StructureTab
             float s = 1f + Random.Range(-ps.entry.scaleVariation, ps.entry.scaleVariation);
             go.transform.localScale = Vector3.one * s;
 
-            // Random hue
+            // Random hue - do not modify sharedMaterial
             var rend = go.GetComponentInChildren<Renderer>();
-            if (rend != null && rend.sharedMaterial.HasProperty("_Color"))
+            if (rend != null && rend.sharedMaterial != null && rend.sharedMaterial.HasProperty("_Color"))
             {
-                Color c = rend.sharedMaterial.color;
+                var mat = new Material(rend.sharedMaterial);
+                Color c = mat.color;
                 Color.RGBToHSV(c, out float h, out float sat, out float val);
                 h = Mathf.Repeat(h + Random.Range(-ps.entry.hueVariation, ps.entry.hueVariation), 1f);
-                rend.sharedMaterial.color = Color.HSVToRGB(h, sat, val);
+                mat.color = Color.HSVToRGB(h, sat, val);
+                rend.material = mat; // assign instance material
             }
         }
 
@@ -335,6 +351,12 @@ public class StructureTab
 
             if (mat != null)
                 mr.sharedMaterial = mat;
+
+            if (combines.Count == 0)
+            {
+                Object.DestroyImmediate(cellGO);
+                continue;
+            }
 
             var mesh = new Mesh();
             mesh.CombineMeshes(combines.ToArray(), true, true);
