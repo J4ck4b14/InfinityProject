@@ -174,15 +174,15 @@ public class SocialGraphView : GraphView
                 edge.edgeColor = GetEdgeColor(type, newTrust);
                 edge.edgeThickness = Mathf.Lerp(2f, 8f, Mathf.Abs(newTrust));
                 edge.ApplyOverlayVisual(this); // redraw overlay
-                Debug.Log($"📝 Updated trust: {from.title} → {to.title} = {newTrust:F2}");
+                Debug.Log($"📝 Updated trust: {from.title} -> {to.title} = {newTrust:F2}");
             });
         }
 
         edge.tooltip = type == VillageConnectionType.Commerce
-            ? $"Trade route: {from.title} → {to.title}"
-            : $"Trust: {weight:F2} ({from.title} → {to.title})";
+            ? $"Trade route: {from.title} -> {to.title}"
+            : $"Trust: {weight:F2} ({from.title} -> {to.title})";
 
-        Debug.Log($"✔️ {type} edge created: {from.title} → {to.title} (w={weight:F2})");
+        Debug.Log($"✔️ {type} edge created: {from.title} -> {to.title} (w={weight:F2})");
     }
 
     public CitizenNode CreateCitizenNode(MockCitizen citizen, Vector2 position)

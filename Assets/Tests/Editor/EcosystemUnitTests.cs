@@ -2,7 +2,6 @@ using NUnit.Framework;
 using Unity.Entities;
 using Unity.Transforms;
 using Unity.Collections;
-using UnityEngine;
 using InfinityProject.Time;
 using System;
 using System.Threading;
@@ -11,236 +10,268 @@ using Unity.Mathematics;
 
 namespace InfinityProject.Tests
 {
- public class EcosystemUnitTests
- {
- World CreateTestWorld(string name = "TestWorld")
- {
- var original = World.DefaultGameObjectInjectionWorld;
- var w = new World(name);
- World.DefaultGameObjectInjectionWorld = w;
- return w;
- }
+    public class EcosystemUnitTests
+    {
+        // ── Helpers ───────────────────────────────────────────────────────────
 
- void FinishWork(World world)
- {
- var em = world.EntityManager;
- world.Update();
- em.CompleteAllTrackedJobs();
- world.Update();
- }
+        World CreateTestWorld(string name = "TestWorld")
+        {
+            var original = World.DefaultGameObjectInjectionWorld;
+            var w = new World(name);
+            World.DefaultGameObjectInjectionWorld = w;
+            return w;
+        }
 
- bool WaitFor(Func<bool> condition, World world, int timeoutMs =1000, int sleepMs =10)
- {
- var em = world.EntityManager;
- var sw = Stopwatch.StartNew();
- var beginSim = world.GetExistingSystemManaged<BeginSimulationEntityCommandBufferSystem>();
- while (sw.ElapsedMilliseconds < timeoutMs)
- {
- // Ensure any scheduled jobs are completed and ECBs applied, then run a world step
- em.CompleteAllTrackedJobs();
- if (condition()) return true;
+        // Creates a GameTime singleton using TotalSeconds (new API)
+        Entity CreateGameTime(EntityManager em, byte scaleIndex = 1)
+        {
+            var e = em.CreateEntity(typeof(GameTime));
+            em.SetComponentData(e, new GameTime { TotalSeconds = 0.0, ScaleIndex = scaleIndex });
+            return e;
+        }
 
- // Run BeginSimulation ECB playback to apply command buffers created by systems
- beginSim?.Update();
- em.CompleteAllTrackedJobs();
- if (condition()) return true;
+        bool WaitFor(Func<bool> condition, World world, int timeoutMs = 1000, int sleepMs = 10)
+        {
+            var em       = world.EntityManager;
+            var beginSim = world.GetExistingSystemManaged<BeginSimulationEntityCommandBufferSystem>();
+            var sw       = Stopwatch.StartNew();
 
- world.Update();
- em.CompleteAllTrackedJobs();
- if (condition()) return true;
+            while (sw.ElapsedMilliseconds < timeoutMs)
+            {
+                em.CompleteAllTrackedJobs();
+                if (condition()) return true;
 
- Thread.Sleep(sleepMs);
- }
- return false;
- }
+                beginSim?.Update();
+                em.CompleteAllTrackedJobs();
+                if (condition()) return true;
 
- [Test]
- public void Reproduction_CreatesChild()
- {
- var original = World.DefaultGameObjectInjectionWorld;
- World world = null;
- try
- {
- world = CreateTestWorld("ReproCreateWorld");
- var em = world.EntityManager;
+                world.Update();
+                em.CompleteAllTrackedJobs();
+                if (condition()) return true;
 
- // GameTime singleton
- var gt = em.CreateEntity(typeof(GameTime));
- em.SetComponentData(gt, new GameTime { TotalYears =0.0, ScaleIndex =1 });
+                Thread.Sleep(sleepMs);
+            }
+            return false;
+        }
 
- // Ensure systems exist and get reproduction system instance
- var beginSim = world.GetOrCreateSystemManaged<BeginSimulationEntityCommandBufferSystem>();
- var reproduction = world.GetOrCreateSystemManaged<AnimalReproductionSystem>();
+        // ── Tests ─────────────────────────────────────────────────────────────
 
- // Prefab entity
- var prefab = em.CreateEntity(typeof(Lifespan), typeof(HealthDamage), typeof(LocalTransform));
- em.SetComponentData(prefab, new Lifespan { MinAge =0f, MaxAge =10f, Age =0f, IsLegendary = false });
- em.SetComponentData(prefab, new HealthDamage { CurrentHealth =100f, MaxHealth =100f, MinDamage =0f, MaxDamage =0f });
- em.SetComponentData(prefab, new LocalTransform { Position = new float3(0f,0f,0f), Rotation = quaternion.identity, Scale =1f });
+        [Test]
+        public void Reproduction_CreatesChild()
+        {
+            var original = World.DefaultGameObjectInjectionWorld;
+            World world  = null;
+            try
+            {
+                world = CreateTestWorld("ReproCreateWorld");
+                var em = world.EntityManager;
+                CreateGameTime(em);
 
- // Parent configured to reproduce immediately
- var parent = em.CreateEntity(typeof(ReproductionData), typeof(HealthDamage), typeof(Lifespan), typeof(PrefabRef), typeof(LocalTransform));
- em.SetComponentData(parent, new ReproductionData { ReproductionTimer =0f, FertilityWindow = new Unity.Mathematics.float2(0f,10f) });
- em.SetComponentData(parent, new PrefabRef { Prefab = prefab });
- em.SetComponentData(parent, new HealthDamage { CurrentHealth =100f, MaxHealth =100f, MinDamage =0f, MaxDamage =0f });
- em.SetComponentData(parent, new LocalTransform { Position = new float3(0f,0f,0f), Rotation = quaternion.identity, Scale =1f });
+                var beginSim     = world.GetOrCreateSystemManaged<BeginSimulationEntityCommandBufferSystem>();
+                var reproduction = world.GetOrCreateSystemManaged<AnimalReproductionSystem>();
 
- var q = em.CreateEntityQuery(typeof(Lifespan));
- int before = q.CalculateEntityCount();
+                var prefab = em.CreateEntity(typeof(Lifespan), typeof(HealthDamage), typeof(LocalTransform));
+                em.SetComponentData(prefab, new Lifespan    { MinAge = 0f, MaxAge = 10f, Age = 0f, IsLegendary = false });
+                em.SetComponentData(prefab, new HealthDamage{ CurrentHealth = 100f, MaxHealth = 100f });
+                em.SetComponentData(prefab, LocalTransform.Identity);
 
- // Run reproduction system synchronously, then allow ECB playback
- reproduction.Update();
- em.CompleteAllTrackedJobs();
+                var parent = em.CreateEntity(
+                    typeof(ReproductionData), typeof(HealthDamage),
+                    typeof(Lifespan), typeof(PrefabRef), typeof(LocalTransform));
 
- // Force the BeginSimulation ECB system to run so instantiation is applied
- beginSim.Update();
- em.CompleteAllTrackedJobs();
- world.Update();
- em.CompleteAllTrackedJobs();
+                em.SetComponentData(parent, new ReproductionData
+                {
+                    ReproductionTimer = 0f,
+                    FertilityWindow   = new float2(0f, 10f)
+                });
+                em.SetComponentData(parent, new PrefabRef    { Prefab = prefab });
+                em.SetComponentData(parent, new HealthDamage { CurrentHealth = 100f, MaxHealth = 100f });
+                em.SetComponentData(parent, new Lifespan     { MinAge = 0f, MaxAge = 10f, Age = 1f, IsLegendary = false });
+                em.SetComponentData(parent, LocalTransform.Identity);
 
- // Wait for child creation as a robust check
- bool created = WaitFor(() => q.CalculateEntityCount() > before, world,2000);
+                var q      = em.CreateEntityQuery(typeof(Lifespan));
+                int before = q.CalculateEntityCount();
 
- int after = q.CalculateEntityCount();
- Assert.IsTrue(created, $"Reproduction did not create a child in time (before={before}, after={after}).");
- }
- finally
- {
- if (world != null)
- {
- world.Dispose();
- }
- World.DefaultGameObjectInjectionWorld = original;
- }
- }
+                TimeTestShim.OverrideDeltaSeconds = 1f;
+                reproduction.Update();
+                em.CompleteAllTrackedJobs();
+                beginSim.Update();
+                em.CompleteAllTrackedJobs();
+                TimeTestShim.OverrideDeltaSeconds = 0f;
 
- [Test]
- public void Reproduction_AdvancesParentTimer()
- {
- var original = World.DefaultGameObjectInjectionWorld;
- World world = null;
- try
- {
- world = CreateTestWorld("ReproTimerWorld");
- var em = world.EntityManager;
+                bool created = WaitFor(() => q.CalculateEntityCount() > before, world, 2000);
+                Assert.IsTrue(created,
+                    $"Reproduction did not create a child (before={before}, after={q.CalculateEntityCount()}).");
+            }
+            finally
+            {
+                TimeTestShim.OverrideDeltaSeconds = 0f;
+                world?.Dispose();
+                World.DefaultGameObjectInjectionWorld = original;
+            }
+        }
 
- var gt = em.CreateEntity(typeof(GameTime));
- em.SetComponentData(gt, new GameTime { TotalYears =0.0, ScaleIndex =1 });
+        [Test]
+        public void Reproduction_AdvancesParentTimer()
+        {
+            var original = World.DefaultGameObjectInjectionWorld;
+            World world  = null;
+            try
+            {
+                world = CreateTestWorld("ReproTimerWorld");
+                var em = world.EntityManager;
+                CreateGameTime(em);
 
- var beginSim = world.GetOrCreateSystemManaged<BeginSimulationEntityCommandBufferSystem>();
- var reproduction = world.GetOrCreateSystemManaged<AnimalReproductionSystem>();
+                var beginSim     = world.GetOrCreateSystemManaged<BeginSimulationEntityCommandBufferSystem>();
+                var reproduction = world.GetOrCreateSystemManaged<AnimalReproductionSystem>();
 
- var prefab = em.CreateEntity(typeof(Lifespan), typeof(HealthDamage), typeof(LocalTransform));
- em.SetComponentData(prefab, new Lifespan { MinAge =0f, MaxAge =10f, Age =0f, IsLegendary = false });
- em.SetComponentData(prefab, new LocalTransform { Position = new float3(0f,0f,0f), Rotation = quaternion.identity, Scale =1f });
+                var prefab = em.CreateEntity(typeof(Lifespan), typeof(HealthDamage), typeof(LocalTransform));
+                em.SetComponentData(prefab, new Lifespan    { MinAge = 0f, MaxAge = 10f, Age = 0f });
+                em.SetComponentData(prefab, LocalTransform.Identity);
 
- var parent = em.CreateEntity(typeof(ReproductionData), typeof(PrefabRef), typeof(HealthDamage), typeof(LocalTransform), typeof(Lifespan));
- em.SetComponentData(parent, new ReproductionData { ReproductionTimer =0f, FertilityWindow = new Unity.Mathematics.float2(0f,10f) });
- em.SetComponentData(parent, new PrefabRef { Prefab = prefab });
- em.SetComponentData(parent, new HealthDamage { CurrentHealth =100f, MaxHealth =100f, MinDamage =0f, MaxDamage =0f });
- em.SetComponentData(parent, new LocalTransform { Position = new float3(0f,0f,0f), Rotation = quaternion.identity, Scale =1f });
- em.SetComponentData(parent, new Lifespan { MinAge =0f, MaxAge =10f, Age =1f, IsLegendary = false });
+                var parent = em.CreateEntity(
+                    typeof(ReproductionData), typeof(PrefabRef),
+                    typeof(HealthDamage), typeof(LocalTransform), typeof(Lifespan));
 
- // Run reproduction synchronously
- reproduction.Update();
- em.CompleteAllTrackedJobs();
- beginSim.Update();
- em.CompleteAllTrackedJobs();
- world.Update();
- em.CompleteAllTrackedJobs();
+                em.SetComponentData(parent, new ReproductionData
+                {
+                    ReproductionTimer = 0f,
+                    FertilityWindow   = new float2(0f, 10f)
+                });
+                em.SetComponentData(parent, new PrefabRef    { Prefab = prefab });
+                em.SetComponentData(parent, new HealthDamage { CurrentHealth = 100f, MaxHealth = 100f });
+                em.SetComponentData(parent, new Lifespan     { MinAge = 0f, MaxAge = 10f, Age = 1f });
+                em.SetComponentData(parent, LocalTransform.Identity);
 
- // Wait until parent timer is advanced, with timeout
- bool ok = WaitFor(() =>
- {
- var r = em.GetComponentData<ReproductionData>(parent);
- return r.ReproductionTimer >0f;
- }, world,2000);
+                TimeTestShim.OverrideDeltaSeconds = 1f;
+                reproduction.Update();
+                em.CompleteAllTrackedJobs();
+                beginSim.Update();
+                em.CompleteAllTrackedJobs();
+                TimeTestShim.OverrideDeltaSeconds = 0f;
 
- var final = em.GetComponentData<ReproductionData>(parent);
- Assert.IsTrue(ok, $"Parent reproduction timer did not advance in time (final value = {final.ReproductionTimer}).");
- }
- finally
- {
- if (world != null) world.Dispose();
- World.DefaultGameObjectInjectionWorld = original;
- }
- }
+                bool ok = WaitFor(() =>
+                    em.GetComponentData<ReproductionData>(parent).ReproductionTimer > 0f,
+                    world, 2000);
 
- [Test]
- public void Aging_IncrementsAge_ForNonLegendary()
- {
- var original = World.DefaultGameObjectInjectionWorld;
- World world = null;
- try
- {
- world = CreateTestWorld("AgingWorld");
- var em = world.EntityManager;
+                var final = em.GetComponentData<ReproductionData>(parent);
+                Assert.IsTrue(ok,
+                    $"Parent reproduction timer did not advance (final={final.ReproductionTimer}).");
+            }
+            finally
+            {
+                TimeTestShim.OverrideDeltaSeconds = 0f;
+                world?.Dispose();
+                World.DefaultGameObjectInjectionWorld = original;
+            }
+        }
 
- var gt = em.CreateEntity(typeof(GameTime));
- em.SetComponentData(gt, new GameTime { TotalYears =0.0, ScaleIndex =1 });
+        [Test]
+        public void Aging_IncrementsAge_ForNonLegendary()
+        {
+            var original = World.DefaultGameObjectInjectionWorld;
+            World world  = null;
+            try
+            {
+                world = CreateTestWorld("AgingWorld");
+                var em = world.EntityManager;
+                CreateGameTime(em);
 
- var aging = world.GetOrCreateSystemManaged<AnimalAgingSystem>();
+                var aging = world.GetOrCreateSystemManaged<AnimalAgingSystem>();
 
- var e = em.CreateEntity(typeof(Lifespan));
- em.SetComponentData(e, new Lifespan { MinAge =0f, MaxAge =10f, Age =2f, IsLegendary = false });
+                var e = em.CreateEntity(typeof(Lifespan));
+                em.SetComponentData(e, new Lifespan { MinAge = 0f, MaxAge = 10f, Age = 2f, IsLegendary = false });
 
- // Use test shim to force a non-zero delta so aging advances
- TimeTestShim.OverrideDeltaSeconds =1f;
+                TimeTestShim.OverrideDeltaSeconds = 1f;
+                aging.Update();
+                em.CompleteAllTrackedJobs();
+                TimeTestShim.OverrideDeltaSeconds = 0f;
 
- // Run aging system synchronously
- aging.Update();
- em.CompleteAllTrackedJobs();
+                var lf = em.GetComponentData<Lifespan>(e);
+                Assert.Greater(lf.Age, 2f, "Age should increase for non-legendary entities.");
+            }
+            finally
+            {
+                TimeTestShim.OverrideDeltaSeconds = 0f;
+                world?.Dispose();
+                World.DefaultGameObjectInjectionWorld = original;
+            }
+        }
 
- // Clear test shim
- TimeTestShim.OverrideDeltaSeconds =0f;
+        [Test]
+        public void Aging_DoesNotIncrement_ForLegendary()
+        {
+            var original = World.DefaultGameObjectInjectionWorld;
+            World world  = null;
+            try
+            {
+                world = CreateTestWorld("LegendaryAgingWorld");
+                var em = world.EntityManager;
+                CreateGameTime(em);
 
- var lf = em.GetComponentData<Lifespan>(e);
- Assert.Greater(lf.Age,2f, "Aging system should increase Age for non-legendary entities.");
- }
- finally
- {
- if (world != null) world.Dispose();
- World.DefaultGameObjectInjectionWorld = original;
- }
- }
+                var aging = world.GetOrCreateSystemManaged<AnimalAgingSystem>();
 
- [Test]
- public void MemorySystem_DecaysOrPrunesEvents()
- {
- var original = World.DefaultGameObjectInjectionWorld;
- World world = null;
- try
- {
- world = CreateTestWorld("MemoryWorld");
- var em = world.EntityManager;
+                var e = em.CreateEntity(typeof(Lifespan));
+                em.SetComponentData(e, new Lifespan { MinAge = 0f, MaxAge = 10f, Age = 2f, IsLegendary = true });
 
- var memory = world.GetOrCreateSystemManaged<MemorySystem>();
+                TimeTestShim.OverrideDeltaSeconds = 1f;
+                aging.Update();
+                em.CompleteAllTrackedJobs();
+                TimeTestShim.OverrideDeltaSeconds = 0f;
 
- var id = em.CreateEntity(typeof(Identity));
- em.SetComponentData(id, new Identity { NameHash =1, Age =30f, SocialRank =1 });
- var buf = em.AddBuffer<MemoryEvent>(id);
- buf.Add(new MemoryEvent { Type = EventType.Aid, Target = Entity.Null, Timestamp =0.0, EmotionalWeight =1f, Magnitude =0.5f });
+                var lf = em.GetComponentData<Lifespan>(e);
+                Assert.AreEqual(2f, lf.Age, 1e-6f, "Legendary entities should not age.");
+            }
+            finally
+            {
+                TimeTestShim.OverrideDeltaSeconds = 0f;
+                world?.Dispose();
+                World.DefaultGameObjectInjectionWorld = original;
+            }
+        }
 
- // Use test shim to force a non-zero delta so decay happens
- TimeTestShim.OverrideDeltaSeconds =1f;
+        [Test]
+        public void MemorySystem_DecaysOrPrunesEvents()
+        {
+            var original = World.DefaultGameObjectInjectionWorld;
+            World world  = null;
+            try
+            {
+                world = CreateTestWorld("MemoryWorld");
+                var em = world.EntityManager;
 
- // Run memory system synchronously
- memory.Update();
- em.CompleteAllTrackedJobs();
+                var memory = world.GetOrCreateSystemManaged<MemorySystem>();
 
- // Clear test shim
- TimeTestShim.OverrideDeltaSeconds =0f;
+                var id = em.CreateEntity(typeof(Identity));
+                em.SetComponentData(id, new Identity { NameHash = 1, Age = 30f, SocialRank = 1 });
+                var buf = em.AddBuffer<MemoryEvent>(id);
+                buf.Add(new MemoryEvent
+                {
+                    Type            = EventType.Aid,
+                    Target          = Entity.Null,
+                    Timestamp       = 0.0,
+                    EmotionalWeight = 1f,
+                    Magnitude       = 0.5f
+                });
 
- var afterBuf = em.GetBuffer<MemoryEvent>(id);
- Assert.LessOrEqual(afterBuf.Length,1, "MemorySystem should prune or keep same number of events.");
- if (afterBuf.Length >0)
- Assert.Less(afterBuf[0].EmotionalWeight,1f, "EmotionalWeight should decay over time.");
- }
- finally
- {
- if (world != null) world.Dispose();
- World.DefaultGameObjectInjectionWorld = original;
- }
- }
- }
+                TimeTestShim.OverrideDeltaSeconds = 1f;
+                memory.Update();
+                em.CompleteAllTrackedJobs();
+                TimeTestShim.OverrideDeltaSeconds = 0f;
+
+                var afterBuf = em.GetBuffer<MemoryEvent>(id);
+                Assert.LessOrEqual(afterBuf.Length, 1,
+                    "MemorySystem should prune or keep the same number of events.");
+                if (afterBuf.Length > 0)
+                    Assert.Less(afterBuf[0].EmotionalWeight, 1f,
+                        "EmotionalWeight should decay over time.");
+            }
+            finally
+            {
+                TimeTestShim.OverrideDeltaSeconds = 0f;
+                world?.Dispose();
+                World.DefaultGameObjectInjectionWorld = original;
+            }
+        }
+    }
 }

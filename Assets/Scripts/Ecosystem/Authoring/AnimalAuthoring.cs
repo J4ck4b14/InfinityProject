@@ -1,111 +1,162 @@
+using InfinityProject.Time;
 using Unity.Entities;
 using Unity.Mathematics;
 using UnityEngine;
 
-public class AnimalAuthoring : MonoBehaviour
+/// <summary>
+/// Inspector values for durations are in IN-GAME YEARS for readability.
+/// The Baker converts them to seconds automatically before storing on the entity.
+/// </summary>
+public class AnimalAuthoringV2 : MonoBehaviour
 {
-    // Enum for diet type: Carnivore, Herbivore, Omnivore
-    public enum DietType
-    {
-        Carnivore,
-        Herbivore,
-        Omnivore
-    }
+    public enum DietType { Carnivore, Herbivore, Omnivore }
 
-    [Header("Life Settings")]
-    [Tooltip("Health of the animal (starting health).")]
-    public float health =100f; // Health of the animal
-    [Tooltip("Maximum damage the animal can deal (relevant for predators).")]
-    public float maxDamage =5f; // Maximum damage the animal can deal (not used by prey)
-    [Tooltip("Minimum damage the animal can deal (relevant for predators).")]
-    public float minDamage =1f; // Minimum damage the animal can deal (not used by prey)
-    [Tooltip("Whether the animal is fertile and able to reproduce.")]
-    public bool fertile = true; // Is the animal fertile (able to reproduce)?
-    [Tooltip("Gender of the animal (true = male, false = female).")]
-    public bool male = true; // Gender of the animal (true = male, false = female)
-    [Tooltip("Age window where the species is fertile")]
-    public Vector2 fertilityWindow = new(0.5f,5f); // Use UnityEngine.Vector2 for inspector
-    [Tooltip("Time (in seconds) before reproduction can happen again.")]
-    public int timeForReproduction =10;
-    [Tooltip("Diet type of the animal (Carnivore, Herbivore, Omnivore).")]
-    public DietType diet = DietType.Herbivore;
+    [Header("Life  (years)")]
+    public float health    = 100f;
+    public float minDamage = 1f;
+    public float maxDamage = 5f;
 
-    [Header("Age Settings")]
-    [Tooltip("Maximum age the animal can live.")]
-    public float maxAge =10f;
-    [Tooltip("Age at which the animal begins to die from old age.")]
-    public float dieAtAge =7f;
+    [Tooltip("Max lifespan in in-game YEARS.")]
+    public float maxAgeYears = 10f;
 
-    [Header("Lifespan Settings")]
-    [Tooltip("Whether the animal has achieved legendary status (cannot die of old age).")]
     public bool isLegendary = false;
 
-    // Baker class to bake the GameObject into an Entity
-    class Baker : Baker<AnimalAuthoring>
+    [Header("Diet & Species")]
+    public DietType diet = DietType.Herbivore;
+    public int speciesId = 1;
+
+    [Header("Gender")]
+    public bool isMale = true;
+
+    [Header("Hunger")]
+    [Range(0f, 0.3f)]
+    [Tooltip("Starting hunger level [0 = full, 1 = starving].")]
+    public float initialHunger = 0.05f;
+
+    [Tooltip("Hunger added per in-game second. " +
+             "Default 1e-7: at 5min/year scale the animal starves in ~5 real minutes.")]
+    public float hungerRate = 1e-7f;
+
+    [Tooltip("Hunger restored by one meal [0–1].")]
+    public float foodRestoreAmount = 0.5f;
+
+    [Tooltip("Passive hunger reduction per in-game second for herbivores/omnivores when not fleeing. " +
+             "Should be slightly greater than hungerRate so resting deer slowly recover. " +
+             "Carnivores ignore this — they rely solely on kills.")]
+    public float grazeRate = 1.1e-7f;
+
+    [Header("Fertility  (years)")]
+    [Tooltip("Earliest age at which the animal can reproduce, in in-game YEARS.")]
+    public float fertilityMinYears = 1f;
+
+    [Tooltip("Latest age at which the animal can reproduce, in in-game YEARS.")]
+    public float fertilityMaxYears = 5f;
+
+    [Tooltip("Minimum time between births, in in-game YEARS.")]
+    public float reproductionCooldownYears = 1f;
+
+    [Header("Vision")]
+    public float visionRange        = 12f;
+    [Range(10f, 180f)]
+    public float visionHalfAngleDeg = 90f;
+
+    [Header("Movement  (scale-independent, real seconds)")]
+    public float speed = 3f;
+
+    // ── Baker ─────────────────────────────────────────────────────────────────
+
+    class Baker : Baker<AnimalAuthoringV2>
     {
-        public override void Bake(AnimalAuthoring authoring)
+        public override void Bake(AnimalAuthoringV2 a)
         {
-            // Get the Entity for this GameObject
             var entity = GetEntity(TransformUsageFlags.Dynamic);
+
+            // Convert all year-based inspector values to seconds once, here.
+            const float SPY = (float)TimeConfig.SecondsPerYear;
+            float maxAgeSec      = a.maxAgeYears              * SPY;
+            float fertilityMinS  = a.fertilityMinYears        * SPY;
+            float fertilityMaxS  = a.fertilityMaxYears        * SPY;
+            float cooldownSec    = a.reproductionCooldownYears * SPY;
 
             AddComponent(entity, new PrefabRef { Prefab = entity });
 
-            // Add core components for the animal entity
             AddComponent(entity, new HealthDamage
             {
-                CurrentHealth = authoring.health,
-                MaxHealth = authoring.health, // Max health same as starting health for now
-                MinDamage = authoring.minDamage,
-                MaxDamage = authoring.maxDamage
+                CurrentHealth = a.health,
+                MaxHealth     = a.health,
+                MinDamage     = a.minDamage,
+                MaxDamage     = a.maxDamage,
             });
 
-            // Add Lifespan component (with randomized lifespan logic)
-            // Use a variable seed so entities don't all get the exact same lifespan.
-            var rnd = new Unity.Mathematics.Random((uint)UnityEngine.Random.Range(1, int.MaxValue));
-            var lifespan = new Lifespan { MinAge =5f, MaxAge = authoring.maxAge, IsLegendary = authoring.isLegendary };
-            lifespan.RandomizeLifespan(rnd); // Randomize the lifespan
+            // Starting age: random in [0, maxAge * 0.5] so nobody spawns near death
+            var   rng      = new Unity.Mathematics.Random((uint)UnityEngine.Random.Range(1, int.MaxValue));
+            float startAge = rng.NextFloat(0f, maxAgeSec * 0.5f);
 
-            AddComponent(entity, lifespan);
-
-            // Add movement component
-            // Ensure horizontal movement (y =0) and normalized direction to avoid vertical drift.
-            var dir = UnityEngine.Random.onUnitSphere;
-            dir.y =0f;
-            var horiz = new float3(dir.x,0f, dir.z);
-            if (math.lengthsq(horiz) <=0f)
-                horiz = new float3(1f,0f,0f);
-            horiz = math.normalize(horiz);
-
-            AddComponent(entity, new Movement { Direction = horiz, Speed =2f });
-
-            // Add reproduction data (use inspector Vector2 -> float2 conversion)
-            AddComponent(entity, new ReproductionData
+            AddComponent(entity, new Lifespan
             {
-                ReproductionTimer =0f,
-                FertilityWindow = new float2(authoring.fertilityWindow.x, authoring.fertilityWindow.y)
+                MinAge      = 0f,
+                MaxAge      = maxAgeSec,
+                Age         = startAge,
+                IsLegendary = a.isLegendary,
+                HeroAge     = maxAgeSec * 0.75f,
+                LegendAge   = maxAgeSec * 0.95f,
             });
 
-            // Add biological gender component
-            AddComponent(entity, new BiologicalGender { IsMale = authoring.male });
+            AddComponent(entity, new Hunger
+            {
+                Level             = a.initialHunger,
+                HungerRate        = a.hungerRate,
+                FoodRestoreAmount = a.foodRestoreAmount,
+                GrazeRate         = a.grazeRate,
+            });
 
-            // Add feeding behavior component (animals will vary based on diet)
+            AddComponent(entity, new SpeciesTag { SpeciesId = a.speciesId });
+
             AddComponent(entity, new FeedingBehavior
             {
-                CanEatMeat = (authoring.diet == DietType.Carnivore || authoring.diet == DietType.Omnivore),
-                CanEatVegetation = (authoring.diet != DietType.Carnivore)
+                CanEatMeat       = a.diet is DietType.Carnivore or DietType.Omnivore,
+                CanEatVegetation = a.diet is DietType.Herbivore or DietType.Omnivore,
             });
 
-            // Add fleeing state components (for prey and predator behavior)
-            AddComponent(entity, new PreyFleeingState { IsFleeing = false });
+            AddComponent(entity, new BiologicalGender { IsMale = a.isMale });
 
-            // Add the group behavior (Herd behavior for prey or pack behavior for predators)
-            AddComponent(entity, new GroupBehavior { GroupId =1, GroupSize =1, CohesionFactor =1.0f });
+            AddComponent(entity, new ReproductionData
+            {
+                ReproductionTimer = cooldownSec,
+                FertilityWindow   = new float2(fertilityMinS, fertilityMaxS),
+            });
 
-            // Add the PackSize component (for pack behavior in predators, not used for prey)
-            AddComponent(entity, new PackSize { Value =1 });
+            AddComponent(entity, new VisionCone
+            {
+                Range     = a.visionRange,
+                HalfAngle = math.radians(a.visionHalfAngleDeg),
+            });
 
-            // Add threat state (used by prey to detect predators)
-            AddComponent(entity, new ThreatState { IsFleeing = false, IsInConflict = false, Target = Entity.Null });
+            AddBuffer<NearbyTarget>(entity);
+
+            var dir   = UnityEngine.Random.onUnitSphere;
+            dir.y     = 0f;
+            var horiz = new float3(dir.x, 0f, dir.z);
+            if (math.lengthsq(horiz) <= 0f) horiz = new float3(1f, 0f, 0f);
+
+            AddComponent(entity, new Movement
+            {
+                Direction = math.normalize(horiz),
+                Speed     = a.speed,
+            });
+
+            AddComponent(entity, new SteeringGoal
+            {
+                Priority        = GoalPriority.Wander,
+                TargetPosition  = float3.zero,
+                TargetEntity    = Entity.Null,
+                SpeedMultiplier = 0.4f,
+            });
+
+            AddComponent(entity, new AlertState   { IsAlert = false });
+            AddComponent(entity, new ThreatState  { IsFleeing = false, IsInConflict = false, Target = Entity.Null });
+            AddComponent(entity, new GroupBehavior { GroupId = a.speciesId, GroupSize = 1, CohesionFactor = 1f });
+            AddComponent(entity, new PackSize     { Value = 1 });
         }
     }
 }

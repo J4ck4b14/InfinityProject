@@ -1,83 +1,84 @@
 using NUnit.Framework;
-using UnityEngine;
 using InfinityProject.Time;
 
 namespace InfinityProject.Tests
 {
- public class TimeTests
- {
- [Test]
- public void TimeConfig_YearScale_HasExpectedLengthAndMonotonicIncrease()
- {
- // Expect8 entries as documented
- Assert.AreEqual(8, TimeConfig.YearScale.Length);
+    public class TimeTests
+    {
+        [Test]
+        public void TimeConfig_ScaleValues_HasExpectedLengthAndPositiveValues()
+        {
+            Assert.AreEqual(5, TimeConfig.ScaleValues.Length);
 
- // All entries should be >=0 and non-decreasing
- for (int i =0; i < TimeConfig.YearScale.Length; i++)
- {
- Assert.GreaterOrEqual(TimeConfig.YearScale[i],0.0);
- if (i >0)
- {
- Assert.GreaterOrEqual(TimeConfig.YearScale[i], TimeConfig.YearScale[i -1]);
- }
- }
- }
+            for (int i = 0; i < TimeConfig.ScaleValues.Length; i++)
+                Assert.Greater(TimeConfig.ScaleValues[i], 0.0,
+                    $"ScaleValues[{i}] should be positive");
+        }
 
- [Test]
- public void TimeConfig_BaseYearsPerSecond_IsConsistentWithConstants()
- {
- double expected = TimeConfig.DaysPerYear / TimeConfig.DayLengthSeconds;
- Assert.AreEqual(expected, TimeConfig.BaseYearsPerSecond,1e-12);
- }
+        [Test]
+        public void TimeConfig_ScaleValues_SlowIsLessThanRealTime()
+        {
+            // Slow (index 0) must be less than 1:1 (index 1)
+            Assert.Less(TimeConfig.ScaleValues[0], TimeConfig.ScaleValues[1]);
+        }
 
- [Test]
- public void GameTime_Defaults_ToZero()
- {
- var gt = new GameTime();
- Assert.AreEqual(0.0, gt.TotalYears);
- Assert.AreEqual(0, gt.ScaleIndex);
- }
+        [Test]
+        public void TimeConfig_ScaleValues_FastModesAreGreaterThanRealTime()
+        {
+            // Indices 2-4 are fast-forward modes — all greater than 1:1
+            for (int i = 2; i < TimeConfig.ScaleValues.Length; i++)
+                Assert.Greater(TimeConfig.ScaleValues[i], TimeConfig.ScaleValues[1],
+                    $"ScaleValues[{i}] should be greater than 1:1 (ScaleValues[1])");
+        }
 
- [Test]
- public void Simulated_GameTime_Update_Computes_DeltaYears_Correctly()
- {
- // Choose a sample deltaTime and scale index and verify calculation
- double deltaTime =1.234; // seconds
- var gt = new GameTime { TotalYears =10.0, ScaleIndex =2 }; // scale index2 corresponds to2x
+        [Test]
+        public void TimeConfig_SecondsPerYear_IsCorrect()
+        {
+            // 365 * 24 * 3600
+            Assert.AreEqual(31_536_000.0, TimeConfig.SecondsPerYear, 1e-6);
+        }
 
- double expectedDeltaYears = TimeConfig.BaseYearsPerSecond * deltaTime * TimeConfig.YearScale[gt.ScaleIndex];
+        [Test]
+        public void TimeConfig_5MinPerYear_ScaleIsCorrect()
+        {
+            // 5 real minutes should pass 1 in-game year worth of seconds
+            // scale = SecondsPerYear / (5 * 60)
+            double expected = TimeConfig.SecondsPerYear / (5 * 60.0);
+            Assert.AreEqual(expected, TimeConfig.ScaleValues[2], 1e-6);
+        }
 
- // Simulate update
- gt.TotalYears += expectedDeltaYears;
+        [Test]
+        public void GameTime_Defaults_ToZero()
+        {
+            var gt = new GameTime();
+            Assert.AreEqual(0.0, gt.TotalSeconds);
+            Assert.AreEqual(0, gt.ScaleIndex);
+        }
 
- // Now compute what we expect the total to be
- double expectedTotal =10.0 + expectedDeltaYears;
- Assert.AreEqual(expectedTotal, gt.TotalYears,1e-12);
- }
+        [Test]
+        public void GameTime_Update_AccumulatesDeltaSeconds_Correctly()
+        {
+            double realDelta  = 1.234;
+            var    gt         = new GameTime { TotalSeconds = 100.0, ScaleIndex = 1 };
+            double expected   = realDelta * TimeConfig.ScaleValues[gt.ScaleIndex];
 
- [Test]
- public void DayNightController_Angle_Calculation_Matches_Manual_Computation()
- {
- // Test several values for TotalYears and verify the computed sun angle
- double[] years = {0.0,0.25,0.5,0.75,1.75,123.456 }; // includes >1 to test fractional extraction
- foreach (var y in years)
- {
- double fracDay = y - System.Math.Floor(y);
- float expectedAngle = (float)(fracDay *360.0 -90.0);
+            gt.TotalSeconds  += expected;
 
- // Recompute the logic used in DayNightController
- float computedAngle = (float)( (y - System.Math.Floor(y)) *360.0 -90.0 );
+            Assert.AreEqual(100.0 + expected, gt.TotalSeconds, 1e-9);
+        }
 
- Assert.AreEqual(expectedAngle, computedAngle,1e-6);
+        [Test]
+        public void GameTime_FastMode_AccumulatesMoreThanRealTime()
+        {
+            double realDelta = 1.0; // 1 real second
+            var    gtFast    = new GameTime { TotalSeconds = 0.0, ScaleIndex = 2 }; // 5min/year
+            var    gtReal    = new GameTime { TotalSeconds = 0.0, ScaleIndex = 1 }; // 1:1
 
- // Quick sanity checks for known cases
- if (System.Math.Abs(fracDay -0.0) <1e-12)
- Assert.AreEqual(-90f, computedAngle,1e-6);
- if (System.Math.Abs(fracDay -0.25) <1e-12)
- Assert.AreEqual(0f, computedAngle,1e-6);
- if (System.Math.Abs(fracDay -0.5) <1e-12)
- Assert.AreEqual(90f, computedAngle,1e-6);
- }
- }
- }
+            gtFast.TotalSeconds += realDelta * TimeConfig.ScaleValues[2];
+            gtReal.TotalSeconds += realDelta * TimeConfig.ScaleValues[1];
+
+            Assert.Greater(gtFast.TotalSeconds, gtReal.TotalSeconds,
+                "Fast mode should accumulate more game-seconds than 1:1 in the same real time");
+        }
+    }
 }

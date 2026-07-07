@@ -3,18 +3,17 @@ using UnityEngine;
 
 /// <summary>
 /// Main editor window for the World Builder Tool.
-/// Hosts three tabs—Map, Flora, and Structures—and delegates drawing and teardown.
+/// Hosts three tabs-Map, Flora, and Structures-and delegates drawing and teardown.
 /// </summary>
 public class WorldBuilderTool : EditorWindow
 {
     // Enumeration of available tabs in the window
-    private enum Tab { Map, Flora, Structures }
+    private enum Tab { Flora, Structures }
 
     // Currently selected tab
-    private Tab currentTab = Tab.Map;
+    private Tab currentTab = Tab.Flora;
 
     // Instances of each tab handler
-    private HeightMapTab heightMapTab;
     private FloraTab floraTab;
     private StructureTab structureTab;
 
@@ -39,7 +38,6 @@ public class WorldBuilderTool : EditorWindow
     /// </summary>
     private void OnEnable()
     {
-        heightMapTab = new HeightMapTab();
         floraTab = new FloraTab();
         structureTab = new StructureTab();
     }
@@ -68,9 +66,6 @@ public class WorldBuilderTool : EditorWindow
         // Draw the active tab content (scaled horizontally)
         switch (currentTab)
         {
-            case Tab.Map:
-                heightMapTab?.Draw();
-                break;
             case Tab.Flora:
                 floraTab?.Draw();
                 break;
@@ -91,8 +86,6 @@ public class WorldBuilderTool : EditorWindow
     private void DrawTabSelector()
     {
         EditorGUILayout.BeginHorizontal();
-        if (GUILayout.Toggle(currentTab == Tab.Map, "Map", "Button"))
-            currentTab = Tab.Map;
         if (GUILayout.Toggle(currentTab == Tab.Flora, "Flora", "Button"))
             currentTab = Tab.Flora;
         if (GUILayout.Toggle(currentTab == Tab.Structures, "Structures", "Button"))
@@ -107,7 +100,6 @@ public class WorldBuilderTool : EditorWindow
     /// </summary>
     private void OnDisable()
     {
-        heightMapTab?.Cleanup();
         floraTab?.Cleanup();
         structureTab?.Cleanup();
     }

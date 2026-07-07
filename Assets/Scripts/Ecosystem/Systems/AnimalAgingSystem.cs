@@ -8,29 +8,21 @@ public partial class AnimalAgingSystem : SystemBase
     [BurstCompile]
     partial struct AgingJob : IJobEntity
     {
-        public float DeltaYears;
+        public float DeltaSeconds;  // in-game seconds this frame
 
         public void Execute(ref Lifespan life)
         {
             if (!life.IsLegendary)
-                life.Age += DeltaYears;
+                life.Age += DeltaSeconds;
         }
     }
 
     protected override void OnUpdate()
     {
-        // Fetch current scale
-        var gt = SystemAPI.GetSingleton<GameTime>();
-        double scale = TimeConfig.YearScale[gt.ScaleIndex];
-        double baseYearsPerSec = TimeConfig.BaseYearsPerSecond;
+        var   gt          = SystemAPI.GetSingleton<GameTime>();
+        float realDelta   = TimeTestShim.EffectiveDeltaSeconds(SystemAPI.Time.DeltaTime);
+        float deltaGameS  = (float)(realDelta * TimeConfig.ScaleValues[gt.ScaleIndex]);
 
-        // Compute scaled years this frame using test shim to allow deterministic test delta
-        double deltaSeconds = TimeTestShim.EffectiveDeltaSeconds(SystemAPI.Time.DeltaTime);
-        double dtYears = baseYearsPerSec * deltaSeconds * scale;
-        float fYears = (float)dtYears;
-
-        var job = new AgingJob { DeltaYears = fYears };
-        var handle = job.ScheduleParallel(Dependency);
-        Dependency = handle;
+        Dependency = new AgingJob { DeltaSeconds = deltaGameS }.ScheduleParallel(Dependency);
     }
 }

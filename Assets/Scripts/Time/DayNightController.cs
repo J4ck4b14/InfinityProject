@@ -1,3 +1,4 @@
+using InfinityProject.Time;
 using System;
 using Unity.Entities;
 using UnityEngine;
@@ -35,7 +36,7 @@ public class DayNightController : MonoBehaviour
         var gt = timeQuery.GetSingleton<GameTime>();
 
         // fraction of the current year --> fraction of the day, stable for large values
-        double fracDay = gt.TotalYears - Math.Floor(gt.TotalYears);
+        double fracDay = gt.TotalSeconds/TimeConfig.SecondsPerYear - Math.Floor(gt.TotalSeconds/TimeConfig.SecondsPerYear);
 
         // map0-->1 to -90º (sunrise) through270º (next sunrise)
         float angle = (float)(fracDay *360.0 -90.0);

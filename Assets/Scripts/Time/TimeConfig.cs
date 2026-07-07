@@ -1,49 +1,39 @@
 namespace InfinityProject.Time
 {
     /// <summary>
-    /// Configuration for how fast in-game time passes relative to real time.
+    /// All time in the simulation is measured in IN-GAME SECONDS.
+    ///
+    /// Each frame: deltaGameSeconds = realDeltaTime * ScaleValues[ScaleIndex]
+    ///
+    /// Useful constants (in in-game seconds):
+    ///   1 minute  =        60
+    ///   1 hour    =     3 600
+    ///   1 day     =    86 400
+    ///   1 year    = 31 536 000
+    ///   1 decade  = 315 360 000
     /// </summary>
     public static class TimeConfig
     {
-        /// <summary>
-        /// Real seconds per full in-game day at normal (1x) speed.
-        /// </summary>
-        public const double DayLengthSeconds = 20 * 60.0;  // 20 minutes
+        // ── Handy constants ───────────────────────────────────────────────────
+        public const double SecondsPerMinute = 60.0;
+        public const double SecondsPerHour   = 3_600.0;
+        public const double SecondsPerDay    = 86_400.0;
+        public const double SecondsPerYear   = 31_536_000.0;
+        public const double SecondsPerDecade = 315_360_000.0;
 
-        /// <summary>
-        /// In-game days per in-game year.
-        /// </summary>
-        public const double DaysPerYear = 365.0;
-
-        /// <summary>
-        /// Base in-game years per real second at 1x speed.
-        /// </summary>
-        public const double BaseYearsPerSecond = DaysPerYear / DayLengthSeconds;
-
-        // ---- Helper for the "5-minute" modes below ----
-
-        /// <summary>
-        /// Factor converting a 5-minute real interval into "normal" in-game days.
-        /// Computed as (DayLengthSeconds) � (5 minutes).
-        /// </summary>
-        private const double FiveMinuteDayFactor = DayLengthSeconds / (5 * 60.0);
-
-        /// <summary>
-        /// Multipliers of <see cref="BaseYearsPerSecond"/>, for each speed mode:
-        /// [0]=Paused, [1]=1x, [2]=2x,
-        /// [3]=1 week in 5 min, [4]=1 month in 5 min,
-        /// [5]=1 year in 5 min, [6]=1 decade in 5 min, [7]=1 century in 5 min.
-        /// </summary>
-        public static readonly double[] YearScale = new double[]
+        // ── Scale values: in-game seconds per real second ─────────────────────
+        // [0] Slow      — 0.5  game-s per real-s (half speed)
+        // [1] 1:1       — 1.0  game-s per real-s (real time)
+        // [2] 5min/year — 5 real minutes compress 1 in-game year
+        // [3] 5min/dec  — 5 real minutes compress 1 in-game decade
+        // [4] 1min/year — 1 real minute  compresses 1 in-game year
+        public static readonly double[] ScaleValues = new double[]
         {
-            0.0,                         // Paused
-            1.0,                         // 1x   normal
-            2.0,                         // 2x   double speed
-            7.0  * FiveMinuteDayFactor,  // 1 week per 5 min
-            30.0 * FiveMinuteDayFactor,  // 1 month per 5 min
-            365.0* FiveMinuteDayFactor,  // 1 year per 5 min
-            3650.0*FiveMinuteDayFactor,  // 1 decade per 5 min
-            36500.0*FiveMinuteDayFactor  // 1 century per 5 min
+            0.5,          // [0] Slow
+            1.0,          // [1] 1:1
+            105_120.0,    // [2] 5 min / year    (31_536_000 / 300)
+            1_051_200.0,  // [3] 5 min / decade  (315_360_000 / 300)
+            525_600.0,    // [4] 1 min / year    (31_536_000 / 60)
         };
     }
 }
