@@ -40,13 +40,20 @@ Shader "InfinityProject/Terrain/Surface"
         // ── Blend sharpness ───────────────────────────────────────────────────
         _BlendSharpness ("Blend Sharpness", Range(1,16)) = 6.0
 
+        // ── Generated world-data mask (R wetness, G biomass, B flow, A retention) ──
+        [NoScaleOffset] _WorldDataTex ("World Data (auto)", 2D) = "gray" {}
+        _WorldDataEnabled ("World Data Enabled", Float) = 0
+        _WetnessDarken ("Wetness Darken", Range(0,0.5)) = 0.18
+        _BiomassGreenBoost ("Biomass Green Boost", Range(0,0.5)) = 0.22
+        _FlowDarken ("Flow Darken", Range(0,0.5)) = 0.10
+
         // ── Lighting ─────────────────────────────────────────────────────────
         _Smoothness ("Smoothness", Range(0,1)) = 0.12
         _Metallic   ("Metallic",   Range(0,1)) = 0.0
 
         // ── Micro-detail: procedural noise overlay ────────────────────────────
         _DetailStrength ("Detail Strength", Range(0,1)) = 0.12
-        _DetailScale    ("Detail Scale",    Float)      = 32.0
+        _DetailScale    ("Detail Size (m)", Float)      = 32.0
 
         // ── Terrain world-space height range (set by C# after generation) ────
         _TerrainBaseY  ("Terrain Base Y  (auto)",  Float) = 0.0
@@ -55,7 +62,7 @@ Shader "InfinityProject/Terrain/Surface"
 
     SubShader
     {
-        Tags { "RenderPipeline"="UniversalPipeline" "RenderType"="Opaque" "Queue"="Geometry" }
+        Tags { "RenderPipeline"="UniversalPipeline" "RenderType"="Opaque" "Queue"="Geometry-100" "TerrainCompatible"="True" }
 
         Pass
         {
@@ -71,6 +78,7 @@ Shader "InfinityProject/Terrain/Surface"
             #pragma multi_compile _ _ADDITIONAL_LIGHTS
             #pragma multi_compile_fog
             #pragma multi_compile _ LIGHTMAP_ON
+            #pragma multi_compile_instancing
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Lighting.hlsl"
@@ -85,12 +93,14 @@ Shader "InfinityProject/Terrain/Surface"
                 float _TexScale;
                 float _SandTexEnabled, _GrassTexEnabled, _RockTexEnabled, _SnowTexEnabled;
                 float _TerrainBaseY, _TerrainHeight;
+                float _WorldDataEnabled, _WetnessDarken, _BiomassGreenBoost, _FlowDarken;
             CBUFFER_END
 
             TEXTURE2D(_SandTex);  SAMPLER(sampler_SandTex);
             TEXTURE2D(_GrassTex); SAMPLER(sampler_GrassTex);
             TEXTURE2D(_RockTex);  SAMPLER(sampler_RockTex);
             TEXTURE2D(_SnowTex);  SAMPLER(sampler_SnowTex);
+            TEXTURE2D(_WorldDataTex); SAMPLER(sampler_WorldDataTex);
 
             struct Attributes
             {
@@ -124,15 +134,29 @@ Shader "InfinityProject/Terrain/Surface"
                 return lerp(lerp(Hash(i),Hash(i+float2(1,0)),u.x),
                             lerp(Hash(i+float2(0,1)),Hash(i+float2(1,1)),u.x),u.y);
             }
-            float Detail(float2 wXZ) { return VNoise(wXZ*_DetailScale)*0.5+VNoise(wXZ*_DetailScale*2.1+0.7)*0.5; }
-
-            // ── Smooth blend weight ────────────────────────────────────────────
-            // Maps a normalised value through a sharpened sigmoid so layers
-            // transition over a narrow band, avoiding the hard-edge look
-            float LayerWeight(float val, float lo, float hi)
+            float Detail(float2 worldXZ)
             {
-                float mid = (lo+hi)*0.5, hw = (hi-lo)*0.5;
-                return saturate(pow(max(1.0 - abs(val-mid)/max(hw,0.001), 0.0), _BlendSharpness));
+                float size = max(_DetailScale, 1.0);
+                float broad = VNoise(worldXZ / size);
+                float fine = VNoise(worldXZ / (size * 0.45) + 0.7);
+                return broad * 0.65 + fine * 0.35;
+            }
+
+            float4 HeightLayerWeights(float height01)
+            {
+                float sharp01 = saturate((_BlendSharpness - 1.0) / 15.0);
+                float blend = lerp(0.10, 0.035, sharp01);
+
+                float sandToGrass = smoothstep(_SandMaxHeight - blend, _SandMaxHeight + blend, height01);
+                float grassToRock = smoothstep(_GrassMaxHeight - blend, _GrassMaxHeight + blend, height01);
+                float rockToSnow = smoothstep(_RockMaxHeight - blend, _RockMaxHeight + blend, height01);
+
+                float4 weights;
+                weights.x = 1.0 - sandToGrass;
+                weights.y = sandToGrass * (1.0 - grassToRock);
+                weights.z = grassToRock * (1.0 - rockToSnow);
+                weights.w = rockToSnow;
+                return weights;
             }
 
             Varyings TerrainVert(Attributes input)
@@ -161,17 +185,29 @@ Shader "InfinityProject/Terrain/Surface"
                 // ── Slope (0=cliff, 1=flat) ────────────────────────────────────
                 float slope = saturate(dot(normalWS, float3(0,1,0)));
 
-                // ── World-space triplanar UV for textures ─────────────────────
-                float2 uvXZ = worldPos.xz / _TexScale;
+                // World-space triplanar sampling avoids stretched bands on steep slopes.
+                float3 triWeights = abs(normalWS);
+                triWeights *= triWeights;
+                triWeights *= triWeights;
+                triWeights /= max(triWeights.x + triWeights.y + triWeights.z, 0.0001);
 
-                // ── Sample each layer (texture or colour) ─────────────────────
                 #define SampleLayer(tex, sampl, enabled, col) \
-                    (enabled > 0.5 ? (half3)SAMPLE_TEXTURE2D(tex, sampl, uvXZ).rgb : (half3)col.rgb)
+                    (enabled > 0.5 ? (half3)(( \
+                        SAMPLE_TEXTURE2D(tex, sampl, worldPos.zy / _TexScale).rgb * triWeights.x + \
+                        SAMPLE_TEXTURE2D(tex, sampl, worldPos.xz / _TexScale).rgb * triWeights.y + \
+                        SAMPLE_TEXTURE2D(tex, sampl, worldPos.xy / _TexScale).rgb * triWeights.z) * col.rgb * 1.55) : (half3)col.rgb)
 
                 half3 sandC  = SampleLayer(_SandTex,  sampler_SandTex,  _SandTexEnabled,  _SandColor);
                 half3 grassC = SampleLayer(_GrassTex, sampler_GrassTex, _GrassTexEnabled, _GrassColor);
                 half3 rockC  = SampleLayer(_RockTex,  sampler_RockTex,  _RockTexEnabled,  _RockColor);
                 half3 snowC  = SampleLayer(_SnowTex,  sampler_SnowTex,  _SnowTexEnabled,  _SnowColor);
+
+                float4 worldData = _WorldDataEnabled > 0.5
+                    ? SAMPLE_TEXTURE2D(_WorldDataTex, sampler_WorldDataTex, input.uv)
+                    : float4(0.5, 0.5, 0.0, 0.5);
+                float wetness = saturate(worldData.r);
+                float biomass = saturate(worldData.g);
+                float flowSignal = saturate(worldData.b);
 
                 // ── Layer blend weights ───────────────────────────────────────
                 // Sand:  low heights
@@ -179,10 +215,11 @@ Shader "InfinityProject/Terrain/Surface"
                 // Rock:  high heights OR steep slope
                 // Snow:  very high heights
 
-                float wSand  = LayerWeight(normH, 0.0,              _SandMaxHeight);
-                float wGrass = LayerWeight(normH, _SandMaxHeight,   _GrassMaxHeight);
-                float wRock  = LayerWeight(normH, _GrassMaxHeight,  _RockMaxHeight);
-                float wSnow  = LayerWeight(normH, _RockMaxHeight,   1.1);  // open-ended at top
+                float4 heightWeights = HeightLayerWeights(normH);
+                float wSand = heightWeights.x;
+                float wGrass = heightWeights.y;
+                float wRock = heightWeights.z;
+                float wSnow = heightWeights.w;
 
                 // Slope override: blend Rock in on cliffs regardless of height
                 float slopeMask = 1.0 - saturate((slope - _RockSlopeMin) / max(1.0-_RockSlopeMin, 0.01));
@@ -191,12 +228,19 @@ Shader "InfinityProject/Terrain/Surface"
                 wGrass *= (1.0 - slopeMask);
                 wSnow  *= (1.0 - slopeMask * 0.6);
 
+                // Generated ecological state nudges the material without replacing geology.
+                wGrass *= lerp(0.72, 1.35, biomass);
+                wSand  *= lerp(1.15, 0.62, wetness);
+
                 // Normalise weights so they sum to 1
                 float wSum = wSand + wGrass + wRock + wSnow + 1e-6;
                 wSand/=wSum; wGrass/=wSum; wRock/=wSum; wSnow/=wSum;
 
                 // ── Blend ─────────────────────────────────────────────────────
                 half3 albedo = sandC*wSand + grassC*wGrass + rockC*wRock + snowC*wSnow;
+                albedo *= 1.0 - wetness * _WetnessDarken;
+                albedo = lerp(albedo, albedo * half3(0.88, 1.12, 0.86), biomass * _BiomassGreenBoost);
+                albedo *= 1.0 - flowSignal * _FlowDarken;
 
                 // ── Procedural detail overlay ─────────────────────────────────
                 float det = Detail(worldPos.xz) * 2.0 - 1.0;
@@ -240,6 +284,7 @@ Shader "InfinityProject/Terrain/Surface"
             #pragma vertex   ShadowCasterVert
             #pragma fragment ShadowCasterFrag
             #pragma multi_compile_shadowcaster
+            #pragma multi_compile_instancing
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Shadows.hlsl"
@@ -249,9 +294,14 @@ Shader "InfinityProject/Terrain/Surface"
                 // Dummy entries - keeps the CBUFFER valid; values unused in shadow pass
                 half4 _SandColor, _GrassColor, _RockColor, _SnowColor;
                 float _SandMaxHeight, _GrassMaxHeight, _RockMaxHeight;
-                float _RockSlopeMin, _BlendSharpness, _Smoothness, _Metallic;
-                float _DetailStrength, _DetailScale, _TexScale, _TerrainBaseY, _TerrainHeight;
+                float _RockSlopeMin;
+                float _BlendSharpness;
+                float _Smoothness, _Metallic;
+                float _DetailStrength, _DetailScale;
+                float _TexScale;
                 float _SandTexEnabled, _GrassTexEnabled, _RockTexEnabled, _SnowTexEnabled;
+                float _TerrainBaseY, _TerrainHeight;
+                float _WorldDataEnabled, _WetnessDarken, _BiomassGreenBoost, _FlowDarken;
             CBUFFER_END
 
             struct ShadowAttribs
@@ -311,15 +361,21 @@ Shader "InfinityProject/Terrain/Surface"
             HLSLPROGRAM
             #pragma vertex   DepthOnlyVert
             #pragma fragment DepthOnlyFrag
+            #pragma multi_compile_instancing
 
             #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
 
             CBUFFER_START(UnityPerMaterial)
                 half4 _SandColor, _GrassColor, _RockColor, _SnowColor;
                 float _SandMaxHeight, _GrassMaxHeight, _RockMaxHeight;
-                float _RockSlopeMin, _BlendSharpness, _Smoothness, _Metallic;
-                float _DetailStrength, _DetailScale, _TexScale, _TerrainBaseY, _TerrainHeight;
+                float _RockSlopeMin;
+                float _BlendSharpness;
+                float _Smoothness, _Metallic;
+                float _DetailStrength, _DetailScale;
+                float _TexScale;
                 float _SandTexEnabled, _GrassTexEnabled, _RockTexEnabled, _SnowTexEnabled;
+                float _TerrainBaseY, _TerrainHeight;
+                float _WorldDataEnabled, _WetnessDarken, _BiomassGreenBoost, _FlowDarken;
             CBUFFER_END
 
             struct DepthAttribs   { float4 positionOS : POSITION; UNITY_VERTEX_INPUT_INSTANCE_ID };

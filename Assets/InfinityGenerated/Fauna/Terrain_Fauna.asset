@@ -1,0 +1,55 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 39ea3840a5374a34492031974fb3a068, type: 3}
+  m_Name: Terrain_Fauna
+  m_EditorClassIdentifier: Assembly-CSharp::InfinityProject.World.Fauna.FaunaAsset
+  settings:
+    Seed: 7331
+    MaximumMovementSubstepDays: 0.02
+    ForageDirectionSamples: 12
+    Species:
+      StableId: deer
+      DisplayName: Deer
+      AgentCount: 300
+      HerdSize: 40
+      MoveSpeedMetersPerDay: 1800
+      ForagePerceptionRadiusMeters: 110
+      BrowseRadiusMeters: 9
+      MaxTraversableSlopeDegrees: 40
+      ComfortableSlopeDegrees: 5
+      ForageSteeringWeight: 1.2
+      HerdCohesionWeight: 0.38
+      HerdCohesionRadiusMeters: 75
+      HeadingPersistenceWeight: 0.2
+      ExplorationWeight: 0.08
+      DailyFoodRequirementKg: 4.5
+      HungerIncreasePerDay: 0.32
+      EnergyUsePerDay: 0.1
+      EnergyRecoveryPerFullRationPerDay: 0.22
+      StarvationHealthLossPerDay: 0.35
+      HealthRecoveryPerDay: 0.025
+      Diet:
+      - FloraSpeciesStableId: temperate_grass
+        Palatability: 1
+      - FloraSpeciesStableId: riparian_shrub
+        Palatability: 0.55
+      - FloraSpeciesStableId: cold_tolerant_conifer
+        Palatability: 0.08
+  sourceGeography: {fileID: 11400000, guid: 85bf3b61727066740a11947224b17161, type: 2}
+  sourceFlora: {fileID: 11400000, guid: 26350d4c26bf193479b3a2c4caaebece, type: 2}
+  sourceGeographyRevision: 7
+  sourceFloraRevision: 8
+  simulationRevision: 93
+  sourceGeographySeed: 500
+  agentCount: 300
+  aliveCount: 300
+  simulationTimeDays: 0

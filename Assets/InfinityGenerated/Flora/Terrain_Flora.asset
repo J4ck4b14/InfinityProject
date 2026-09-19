@@ -1,0 +1,82 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: aec564abfb2b2f249bbcb21a1021fb50, type: 3}
+  m_Name: Terrain_Flora
+  m_EditorClassIdentifier: Assembly-CSharp::InfinityProject.World.Flora.FloraAsset
+  settings:
+    Species:
+    - StableId: temperate_grass
+      DisplayName: Temperate Grass
+      MinimumTemperatureCelsius: 2
+      OptimalTemperatureCelsius: 18
+      MaximumTemperatureCelsius: 34
+      MinimumWaterAvailabilityPotential: 0.24
+      OptimalWaterAvailabilityPotential: 0.55
+      MaximumWaterAvailabilityPotential: 0.92
+      MinimumSoilRetentionPotential: 0.04
+      FullSoilRetentionPotential: 0.28
+      EstablishmentThreshold: 0.32
+      InitialOccupancyFraction: 0.72
+      MaximumBiomassKgPerSquareMeter: 0.75
+      IntrinsicGrowthRatePerDay: 0.055
+      SeedBankRecruitmentRatePerDay: 0.004
+      StressMortalityRatePerDay: 0.12
+      CompetitionStrength: 0.18
+    - StableId: riparian_shrub
+      DisplayName: Riparian Shrub
+      MinimumTemperatureCelsius: 0
+      OptimalTemperatureCelsius: 17
+      MaximumTemperatureCelsius: 32
+      MinimumWaterAvailabilityPotential: 0.55
+      OptimalWaterAvailabilityPotential: 0.78
+      MaximumWaterAvailabilityPotential: 1
+      MinimumSoilRetentionPotential: 0.1
+      FullSoilRetentionPotential: 0.36
+      EstablishmentThreshold: 0.4
+      InitialOccupancyFraction: 0.62
+      MaximumBiomassKgPerSquareMeter: 2.2
+      IntrinsicGrowthRatePerDay: 0.018
+      SeedBankRecruitmentRatePerDay: 0.0012
+      StressMortalityRatePerDay: 0.07
+      CompetitionStrength: 0.28
+    - StableId: cold_tolerant_conifer
+      DisplayName: Cold-Tolerant Conifer
+      MinimumTemperatureCelsius: -18
+      OptimalTemperatureCelsius: 8
+      MaximumTemperatureCelsius: 23
+      MinimumWaterAvailabilityPotential: 0.28
+      OptimalWaterAvailabilityPotential: 0.52
+      MaximumWaterAvailabilityPotential: 0.86
+      MinimumSoilRetentionPotential: 0.14
+      FullSoilRetentionPotential: 0.46
+      EstablishmentThreshold: 0.38
+      InitialOccupancyFraction: 0.52
+      MaximumBiomassKgPerSquareMeter: 7.5
+      IntrinsicGrowthRatePerDay: 0.0035
+      SeedBankRecruitmentRatePerDay: 0.00015
+      StressMortalityRatePerDay: 0.028
+      CompetitionStrength: 0.35
+  modelVersion: 2
+  sourceGeography: {fileID: 11400000, guid: 85bf3b61727066740a11947224b17161, type: 2}
+  sourceHydrology: {fileID: 11400000, guid: d4f51444e3de6bb4694216d6c99c73b0, type: 2}
+  sourceGround: {fileID: 11400000, guid: 3b4d8212247074c43b5b944ede6c5cd0, type: 2}
+  sourceClimate: {fileID: 11400000, guid: 28048513360c5ce4f9af04cc191fe655, type: 2}
+  sourceGeographyRevision: 7
+  sourceHydrologyRevision: 6
+  sourceGroundRevision: 6
+  sourceClimateRevision: 6
+  generationRevision: 8
+  resolution: 1024
+  widthMeters: 2000
+  lengthMeters: 2000
+  sourceGeographySeed: 500
+  speciesCount: 3

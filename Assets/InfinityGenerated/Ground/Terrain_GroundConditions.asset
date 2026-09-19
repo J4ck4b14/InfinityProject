@@ -1,0 +1,39 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 7632193ff74ce334f85c5b9f9b73ebd3, type: 3}
+  m_Name: Terrain_GroundConditions
+  m_EditorClassIdentifier: Assembly-CSharp::InfinityProject.World.Ground.GroundConditionAsset
+  settings:
+    SlopeAnalysisRadiusMeters: 32
+    MinimumSlopeDegrees: 0.25
+    RunOnLocalSupportAreaSquareMeters: 3200
+    RunOnResponseAreaSquareMeters: 18000
+    RunOnWaterBoostStrength: 0.78
+    FullRetentionSlopeDegrees: 7
+    NoRetentionSlopeDegrees: 42
+  modelVersion: 4
+  sourceGeography: {fileID: 11400000, guid: 85bf3b61727066740a11947224b17161, type: 2}
+  sourceHydrology: {fileID: 11400000, guid: d4f51444e3de6bb4694216d6c99c73b0, type: 2}
+  sourceClimate: {fileID: 11400000, guid: 28048513360c5ce4f9af04cc191fe655, type: 2}
+  sourceGeographyRevision: 7
+  sourceHydrologyRevision: 6
+  sourceClimateRevision: 6
+  generationRevision: 6
+  resolution: 1024
+  widthMeters: 2000
+  lengthMeters: 2000
+  sourceGeographySeed: 500
+  sourceHeightHash: 7714571529754425670
+  minimumWetnessIndex: -3.847305
+  maximumWetnessIndex: 14.798564
+  percentile05WetnessIndex: -2.2835484
+  percentile95WetnessIndex: 3.347992
